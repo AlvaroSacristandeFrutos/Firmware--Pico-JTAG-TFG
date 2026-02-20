@@ -1,0 +1,46 @@
+; jtag.pio — transferencia JTAG bit a bit mediante PIO
+;
+; Asignación de pines:
+;   OUT pin 0  = TDI (GP16) — datos hacia el objetivo
+;   IN  pin 0  = TDO (GP17) — datos capturados del objetivo
+;   Sideset    = TCK (GP18), opcional, 1 bit — reloj JTAG
+;
+; Protocolo de uso:
+;   1. Escribir en TX FIFO el número de bits a transferir menos 1
+;   2. Escribir los bytes de TDI en TX FIFO (autopull cada 8 bits)
+;   3. Leer los bytes de TDO de RX FIFO (autopush cada 8 bits)
+;   El desplazamiento es LSB primero, alineado a byte para DMA
+
+.program jtag_xfer
+.side_set 1 opt
+
+    pull block          side 0      ; Esperar número de bits (N-1) del TX FIFO
+    mov x, osr          side 0      ; X = contador del bucle
+    pull block          side 0      ; Precargar la primera palabra de datos
+
+loop:
+    out pins, 1         side 0      ; Sacar el bit de TDI, TCK bajo
+    nop                 side 1      ; TCK alto — el objetivo captura TDI
+    in  pins, 1         side 1      ; Muestrear TDO en el flanco de subida
+    jmp x-- loop        side 0      ; Decrementar contador y repetir
+
+    push                side 0      ; Empujar los bits TDO restantes al RX FIFO
+
+% c-sdk {
+static inline pio_sm_config jtag_xfer_program_get_default_config(uint offset) {
+    pio_sm_config c = pio_get_default_sm_config();
+    /*
+     * El programa tiene 8 instrucciones (offsets 0-7):
+     *   0: pull, 1: mov, 2: pull, 3: out, 4: nop, 5: in, 6: jmp, 7: push
+     * El wrap lleva de la instrucción 7 (push) de vuelta a la 0 (pull),
+     * de modo que transferencias encadenadas no necesitan reiniciar la SM.
+     * NOTA: offset+4 era incorrecto — con ese valor el bucle de bits nunca
+     * ejecutaba las instrucciones 'in' ni 'jmp x--'.
+     */
+    sm_config_set_wrap(&c, offset, offset + 7);
+    sm_config_set_sideset(&c, 2, true, false);  /* 1 bit de sideset, opcional */
+    sm_config_set_out_shift(&c, true, true, 8); /* desplazamiento a la derecha, autopull a 8 bits */
+    sm_config_set_in_shift(&c, true, true, 8);  /* desplazamiento a la derecha, autopush a 8 bits */
+    return c;
+}
+%}
