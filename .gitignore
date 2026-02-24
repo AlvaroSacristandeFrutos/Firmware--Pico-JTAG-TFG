@@ -1,5 +1,26 @@
+# ==========================================
+# Entornos y Herramientas (Añadido para ti)
+# ==========================================
+# Dependencias de Node.js
+node_modules/
+npm-debug.log
+
+# Archivos de configuración de Visual Studio
+.vs/
+*.user
+*.suo
+*.db
+
+# ==========================================
+# C/C++ y CMake (Tu configuración original)
+# ==========================================
 # Directorio de build generado por CMake/ninja
 build/
+out/
+
+# Archivos generados por CMake en la raíz (por si acaso)
+CMakeCache.txt
+CMakeFiles/
 
 # Prerequisites
 *.d

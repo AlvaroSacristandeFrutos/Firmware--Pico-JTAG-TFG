@@ -406,10 +406,16 @@ static void usb_bus_reset(void) {
     vendor_rx_ready = false;
     vendor_tx_busy = false;
 
-    struct usb_endpoint_configuration *ep_in  = usb_get_endpoint_configuration(EP0_IN_ADDR);
-    struct usb_endpoint_configuration *ep_out = usb_get_endpoint_configuration(EP0_OUT_ADDR);
-    if (ep_in)  ep_in->next_pid = 0;
-    if (ep_out) ep_out->next_pid = 0;
+    /*
+     * Resetear los toggles PID de TODOS los endpoints (USB 2.0 §9.4.6):
+     * tras un bus reset tanto el host como el dispositivo vuelven a DATA0.
+     * Si no se hace, la segunda sesión libusb (que reinicia su toggle a DATA0)
+     * choca con el device que espera DATA1 del ciclo anterior.
+     */
+    for (int i = 0; i < USB_NUM_ENDPOINTS; i++) {
+        if (dev_config.endpoints[i].descriptor)
+            dev_config.endpoints[i].next_pid = 0;
+    }
 }
 
 uint32_t usb_get_bus_reset_count(void) {
@@ -449,18 +455,18 @@ void ep1_out_handler(uint8_t *buf, uint16_t len) {
 }
 
 /*
- * Handler para EP1 IN: el host ha recogido nuestra respuesta.
- *
- * Nota sobre el nombre: se llama ep2_in_handler por herencia del código
- * dev_lowlevel original de Raspberry Pi, donde el endpoint de vendor era EP2.
- * En este proyecto es EP1, pero el nombre se mantiene para no romper la
- * convención interna del SDK (los handlers se registran por nombre en
- * usb_descriptors.c y el compilador los resuelve por linkage).
- *
- * Importante: NO rearmar EP1 OUT desde aquí. El rearme lo hace
- * usb_vendor_arm_rx() desde main() una vez procesado el comando completo.
- * Rearmar aquí corrompería el toggle de PID y causaría que el host rechace
- * silenciosamente los paquetes siguientes.
+ * Handler para EP1 IN (0x81, interrupt).
+ * Solo está presente en el descriptor para que jlink.sys entre en modo
+ * de comandos bulk. Nunca se arma; jlink.sys no lee respuestas aquí.
+ */
+void ep1_in_handler(uint8_t *buf, uint16_t len) {
+    (void)buf; (void)len;
+}
+
+/*
+ * Handler para EP2 IN (0x82, bulk).
+ * Canal principal de respuestas J-Link: jlink.sys lee aquí las respuestas
+ * a sus comandos (igual que el hardware J-Link V9 real).
  */
 void ep2_in_handler(uint8_t *buf, uint16_t len) {
     (void)buf; (void)len;
@@ -566,12 +572,12 @@ void usb_vendor_arm_rx(void) {
 bool usb_vendor_write(const uint8_t *data, uint16_t len) {
     if (vendor_tx_busy) {
         /*
-         * Fallback de polling: si la ISR no limpió vendor_tx_busy (puede ocurrir
-         * con EP1 bidireccional en el RP2040), comprobamos directamente el
-         * registro buffer_control para ver si el hardware terminó la transferencia.
+         * Fallback de polling: si la ISR no limpió vendor_tx_busy comprobamos
+         * directamente el registro buffer_control de EP2 IN para ver si el
+         * hardware ya terminó la transferencia bulk.
          */
         struct usb_endpoint_configuration *ep =
-            usb_get_endpoint_configuration(EP1_IN_ADDR);
+            usb_get_endpoint_configuration(EP2_IN_ADDR);
         uint32_t bc = *ep->buffer_control;
         if (!(bc & USB_BUF_CTRL_AVAIL)) {
             vendor_tx_busy = false;
@@ -582,7 +588,7 @@ bool usb_vendor_write(const uint8_t *data, uint16_t len) {
     if (len > 64) len = 64;
 
     vendor_tx_busy = true;
-    usb_start_transfer(usb_get_endpoint_configuration(EP1_IN_ADDR),
+    usb_start_transfer(usb_get_endpoint_configuration(EP2_IN_ADDR),
                        (uint8_t *)data, len);
     return true;
 }
@@ -592,7 +598,7 @@ bool usb_vendor_tx_busy(void) {
 
     /* Consultar el hardware directamente por si la ISR se perdió el evento */
     struct usb_endpoint_configuration *ep =
-        usb_get_endpoint_configuration(EP1_IN_ADDR);
+        usb_get_endpoint_configuration(EP2_IN_ADDR);
     uint32_t bc = *ep->buffer_control;
     if (!(bc & USB_BUF_CTRL_AVAIL)) {
         vendor_tx_busy = false;

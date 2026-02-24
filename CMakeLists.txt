@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.13)
 
-set(PICO_SDK_PATH $ENV{HOME}/.pico-sdk/sdk/2.2.0)
+set(PICO_SDK_PATH $ENV{USERPROFILE}/.pico-sdk/sdk/2.2.0)
 include(pico_sdk_import.cmake)
 
 project(jlink_pico_probe C CXX ASM)

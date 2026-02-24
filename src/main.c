@@ -1,25 +1,27 @@
+/*
+ * Fase B — Protocolo J-Link sobre WinUSB
+ *
+ * El firmware procesa comandos J-Link reales pero sigue usando el VID/PID
+ * propio (0x1209:0xD0DB) con WinUSB, sin depender del driver jlink.sys.
+ * El script tools/test_jlink.mjs envía la secuencia de inicialización que
+ * usaría JLink_x64.dll y verifica que cada respuesta es correcta.
+ *
+ * Objetivo: confirmar que el protocolo J-Link está correctamente implementado
+ * antes de volver a intentar la integración con el driver de Segger.
+ */
+ 
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
-#include "pico/stdlib.h"
 
 #include "board/board_config.h"
-#include "board/clock_init.h"
 #include "board/gpio_init.h"
 #include "util/led.h"
-#include "util/adc.h"
 #include "usb/usb_device.h"
-#include "cdc/cdc_uart.h"
-#include "jtag/jtag_pio.h"
 #include "jlink/jlink_handler.h"
 #include "jlink/jlink_protocol.h"
+#include "jlink/jlink_caps.h"
 
-/*
- * Acceso directo al registro TIMELR del periférico Timer del RP2040.
- * El SDK de Pico lleva su propio wrapper, pero para mantener el código
- * completamente bare-metal accedemos al registro mediante su dirección.
- * TIMELR contiene los 32 bits bajos del contador de 64 bits que corre a 1 MHz.
- */
 #include "hardware/regs/addressmap.h"
 #define TIMER_TIMELR    (*(volatile uint32_t *)(TIMER_BASE + 0x0Cu))
 
@@ -29,74 +31,64 @@ static uint32_t time_us(void) {
 
 static void delay_ms(uint32_t ms) {
     uint32_t start = time_us();
-    uint32_t target_us = ms * 1000u;
-    while ((time_us() - start) < target_us)
+    while ((time_us() - start) < ms * 1000u)
         ;
 }
 
-/* --------------------------------------------------------------------------
- * Rutinas de diagnóstico por LED
- *
- * Durante el desarrollo es la única forma de saber qué está pasando sin
- * tener un UART o un debugger conectado. Las funciones de abajo generan
- * patrones de parpadeos legibles a simple vista.
- * -------------------------------------------------------------------------- */
-
-/* Parpadea el LED N veces: 200 ms encendido, 200 ms apagado. */
 static void led_blink_n(uint32_t n) {
     for (uint32_t i = 0; i < n; i++) {
-        led_set(true);
-        delay_ms(200);
-        led_set(false);
-        delay_ms(200);
+        led_set(true);  delay_ms(200);
+        led_set(false); delay_ms(200);
     }
-}
-
-/* Pausa larga (1 s apagado) para separar grupos de parpadeos. */
-static void led_separator(void) {
-    led_set(false);
-    delay_ms(1000);
 }
 
 /*
- * Muestra un patrón de diagnóstico de forma indefinida.
+ * Diagnóstico de inactividad — muestra el ÚLTIMO BYTE de comando recibido
+ * como dos grupos de destellos, para identificar exactamente qué envía
+ * jlink.sys antes de detenerse, sin necesidad de UART:
  *
- * El patrón se divide en 5 grupos separados por pausas largas:
- *   Grupo 1 — número de comandos recibidos desde que enumeró
- *   Grupo 2 — resets de bus USB ocurridos tras la enumeración inicial
- *   Grupo 3 — nibble alto del primer byte de comando recibido (0-15)
- *   Grupo 4 — nibble bajo del primer byte de comando recibido (0-15)
- *   Grupo 5 — si la última respuesta se envió correctamente (1=sí, 0=no)
+ *   Grupo 1 (LENTO, 600 ms/destello): nibble alto (bits 7-4)
+ *   Pausa de 1.5 s
+ *   Grupo 2 (RÁPIDO, 300 ms/destello): nibble bajo (bits 3-0)
+ *   Pausa de 3 s → repetir
  *
- * Con esto se puede distinguir si el host envió comandos, qué comando
- * fue el primero, y si el EP1 IN llegó a completar la transferencia.
+ * Si el nibble vale 0, se muestran 16 destellos (0 destellos sería invisible).
+ *
+ * Ejemplos:
+ *   0xF2 (READ_CONFIG)  → 15 lentos  | 2 rápidos
+ *   0xF3 (WRITE_CONFIG) → 15 lentos  | 3 rápidos
+ *   0xCF (HW_JTAG3)     → 12 lentos  | 15 rápidos
+ *   0xDC (HW_RESET0)    → 13 lentos  | 12 rápidos
+ *   0x07 (GET_STATE)    → 16 lentos  | 7 rápidos  (nibble alto = 0 → 16)
+ *   0x00 (dato config)  → 16 lentos  | 16 rápidos (no es un comando real)
  */
-static void led_show_diagnostic(uint32_t cmd_count, uint32_t bus_resets,
-                                uint8_t first_cmd, bool tx_ok) {
-    while (1) {
-        led_blink_n(cmd_count);
-        led_separator();
+static void led_diagnostic_tick(uint32_t cmd_count, uint8_t last_byte) {
+    (void)cmd_count;
 
-        led_blink_n(bus_resets);
-        led_separator();
+    uint32_t hi = (last_byte >> 4) & 0xF; if (!hi) hi = 16;
+    uint32_t lo =  last_byte       & 0xF; if (!lo) lo = 16;
 
-        led_blink_n((first_cmd >> 4) & 0x0F);
-        led_separator();
+    const uint32_t slow = 600000u;   /* 300 ms ON + 300 ms OFF */
+    const uint32_t fast = 300000u;   /* 150 ms ON + 150 ms OFF */
+    const uint32_t gap1 = 1500000u;  /* pausa entre nibbles */
+    const uint32_t gap2 = 3000000u;  /* pausa final antes de repetir */
 
-        led_blink_n(first_cmd & 0x0F);
-        led_separator();
+    uint32_t p1    = hi * slow;
+    uint32_t p2    = lo * fast;
+    uint32_t total = p1 + gap1 + p2 + gap2;
+    uint32_t pos   = time_us() % total;
 
-        led_blink_n(tx_ok ? 1 : 0);
-
-        /* Pausa larga antes de repetir el ciclo */
+    if (pos < p1)
+        led_set((pos % slow) < 300000u);
+    else if (pos < p1 + gap1)
         led_set(false);
-        delay_ms(3000);
-    }
+    else if (pos < p1 + gap1 + p2)
+        led_set(((pos - p1 - gap1) % fast) < 150000u);
+    else
+        led_set(false);
 }
 
-/* Buffers para un ciclo de comando/respuesta. El protocolo J-Link es
- * síncrono: el host espera la respuesta antes de enviar el siguiente
- * comando, así que un único par de buffers es suficiente. */
+/* Buffers para un ciclo de comando/respuesta (protocolo J-Link es síncrono) */
 static uint8_t rx_data[CMD_BUF_SIZE];
 static uint8_t tx_data[TX_BUF_SIZE];
 
@@ -104,70 +96,65 @@ static uint8_t tx_data[TX_BUF_SIZE];
  * Punto de entrada (Core 0)
  * -------------------------------------------------------------------------- */
 int main(void) {
-    stdio_init_all();
     gpio_init_all();
     led_init();
-    jtag_pio_init();
-
     usb_device_init();
 
-    /*
-     * Esperar a que el host complete la enumeración USB.
-     * Mientras tanto el LED parpadea lentamente para indicar que estamos
-     * esperando. Si el host no enumera en 15 segundos, pasamos al modo
-     * de error de abajo.
+    /* Esperar configuración USB — LED parpadea sin bloquear para que el
+     * polling sea lo más rápido posible (USB es interrupt-driven).
+     *
+     * jlink.sys lee las respuestas J-Link de EP2 IN (bulk), no de EP1 IN
+     * (interrupt). EP1 IN sólo debe existir en el descriptor para que
+     * jlink.sys entre en modo de comandos bulk; no necesita datos.
      */
     bool did_enumerate = false;
     {
-        uint32_t enum_start = time_us();
+        uint32_t enum_start  = time_us();
+        uint32_t last_blink  = enum_start;
+        bool     blink_state = false;
         while ((time_us() - enum_start) < 15000000u) {
-            if (usb_is_enumerated()) {
+            if (usb_is_configured()) {
+                jlink_handler_reset();  /* nueva sesión — resetear flag de flush */
                 did_enumerate = true;
                 break;
             }
-            led_toggle();
-            delay_ms(250);
+            /* Parpadeo ~4 Hz sin delay bloqueante */
+            if ((time_us() - last_blink) >= 250000u) {
+                blink_state = !blink_state;
+                led_set(blink_state);
+                last_blink += 250000u;
+            }
         }
     }
 
     if (!did_enumerate) {
-        /*
-         * No se produjo la enumeración. Mostramos el número de resets de
-         * bus que el controlador USB contó — si es cero, el cable no está
-         * conectado; si es mayor que cero, el host detectó el dispositivo
-         * pero algo falló en los descriptores.
-         * Patrón: [N parpadeos] — 2 s LED encendido — 1 s apagado — repetir.
-         */
         while (1) {
             uint32_t resets = usb_get_bus_reset_count();
-            led_blink_n(resets > 0 ? resets : 0);
-            led_set(true);
-            delay_ms(2000);
-            led_set(false);
-            delay_ms(1000);
+            led_blink_n(resets > 0 ? resets : 1);
+            led_set(true);  delay_ms(2000);
+            led_set(false); delay_ms(1000);
         }
     }
 
-    /* Enumeración exitosa — LED fijo para indicar que estamos listos */
-    led_set(true);
+    led_set(true);  /* enumeración OK */
 
-    adc_sense_init();
-    cdc_uart_init();
+    uint32_t cmd_count           = 0;
+    uint8_t  first_cmd_byte      = 0;
+    uint8_t  last_cmd_byte       = 0;
+    uint32_t bus_resets_at_start = usb_get_bus_reset_count();
+    uint32_t last_activity_us    = time_us();
 
-    /* Variables de diagnóstico para el modo de diagnóstico por LED */
-    uint32_t cmd_count            = 0;
-    uint8_t  first_cmd_byte       = 0;
-    bool     last_tx_ok           = false;
-    uint32_t bus_resets_at_start  = usb_get_bus_reset_count();
-    uint32_t last_activity_us     = time_us();
+    /*
+     * Estado para acumulación multi-paquete de WRITE_CONFIG (0xF3).
+     * El comando completo mide 1 (cmd) + 256 (datos) = 257 bytes → 5 paquetes USB.
+     * write_cfg_active se activa al recibir 0xF3 y desactiva cuando acumulamos 256 bytes.
+     */
+    static uint8_t  write_cfg_buf[256];
+    static uint16_t write_cfg_accum  = 0;
+    static bool     write_cfg_active = false;
 
     /* --------------------------------------------------------------------------
      * Bucle principal de comandos J-Link
-     *
-     * El protocolo J-Link es síncrono: el host envía un comando por EP1 OUT,
-     * nosotros lo procesamos y respondemos por EP1 IN, y el host espera la
-     * respuesta antes de enviar el siguiente. No hace falta usar múltiples
-     * buffers ni dos núcleos para esto.
      * -------------------------------------------------------------------------- */
     while (1) {
         usb_device_task();
@@ -180,58 +167,91 @@ int main(void) {
             cmd_count++;
             if (cmd_count == 1) first_cmd_byte = pkt[0];
 
-            memcpy(rx_data, pkt, len);
+            if (write_cfg_active) {
+                /*
+                 * Paquetes de datos de WRITE_CONFIG: acumular en write_cfg_buf.
+                 * No se genera respuesta; simplemente seguimos leyendo.
+                 */
+                last_cmd_byte = 0xF3; /* seguimos en contexto WRITE_CONFIG */
 
-            uint16_t tx_len = 0;
-            jlink_handle_command(rx_data, len, tx_data, &tx_len);
+                uint16_t space = 256 - write_cfg_accum;
+                uint16_t copy  = (len < space) ? (uint16_t)len : space;
+                memcpy(write_cfg_buf + write_cfg_accum, pkt, copy);
+                write_cfg_accum += copy;
 
-            /*
-             * Enviar la respuesta en trozos de 64 bytes (tamaño máximo de
-             * paquete bulk del RP2040). Para respuestas largas como VERSION
-             * o JTAG3 esto puede suponer varios paquetes consecutivos.
-             */
-            if (tx_len > 0) {
-                uint16_t tx_offset = 0;
-                while (tx_offset < tx_len) {
-                    uint16_t remaining = tx_len - tx_offset;
-                    uint16_t chunk = (remaining > 64) ? 64 : remaining;
-                    if (usb_vendor_write(&tx_data[tx_offset], chunk)) {
-                        tx_offset += chunk;
-                    }
-                    usb_device_task();
+                if (write_cfg_accum >= 256) {
+                    jlink_config_update(write_cfg_buf, 256);
+                    write_cfg_active = false;
+                    write_cfg_accum  = 0;
                 }
 
-                /* Esperar a que EP1 IN complete la transferencia.
-                 * Timeout de 500 ms — si el host no lee en ese tiempo,
-                 * el driver probablemente no está abierto correctamente. */
-                uint32_t wait_start = time_us();
-                last_tx_ok = false;
-                while ((time_us() - wait_start) < 500000u) {
-                    if (!usb_vendor_tx_busy()) {
-                        last_tx_ok = true;
-                        break;
-                    }
-                    usb_device_task();
-                }
+                usb_vendor_arm_rx();
             } else {
-                last_tx_ok = true;  /* el comando no requería respuesta */
+                last_cmd_byte = pkt[0];
+                memcpy(rx_data, pkt, len);
+
+                uint16_t tx_len = 0;
+                jlink_handle_command(rx_data, len, tx_data, &tx_len);
+
+                /*
+                 * Si el comando fue WRITE_CONFIG, los datos llegan en paquetes
+                 * subsiguientes.  El primer paquete ya contiene len-1 bytes de datos
+                 * (después del byte de comando).
+                 */
+                if (pkt[0] == EMU_CMD_WRITE_CONFIG) {
+                    write_cfg_active = true;
+                    write_cfg_accum  = 0;
+                    if (len > 1) {
+                        uint16_t data_in_first = len - 1;
+                        if (data_in_first > 256) data_in_first = 256;
+                        memcpy(write_cfg_buf, pkt + 1, data_in_first);
+                        write_cfg_accum = data_in_first;
+                        if (write_cfg_accum >= 256) {
+                            jlink_config_update(write_cfg_buf, 256);
+                            write_cfg_active = false;
+                            write_cfg_accum  = 0;
+                        }
+                    }
+                }
+
+                if (tx_len > 0) {
+                    /* Enviar en trozos de 64 bytes (máximo paquete bulk) */
+                    uint16_t offset = 0;
+                    while (offset < tx_len) {
+                        uint16_t chunk = tx_len - offset;
+                        if (chunk > 64) chunk = 64;
+                        if (usb_vendor_write(&tx_data[offset], chunk))
+                            offset += chunk;
+                        usb_device_task();
+                    }
+
+                    /*
+                     * Para el flush de sincronización (0x00): fire-and-forget.
+                     * EP2 IN queda armado con la VERSION; jlink.sys la leerá
+                     * cuando sondee EP2 IN bulk. No bloqueamos aquí porque
+                     * los 1023 paquetes de ceros restantes deben fluir sin pausa.
+                     *
+                     * Para cualquier otro comando: esperar hasta 500 ms a que
+                     * jlink.sys lea la respuesta de EP2 IN.
+                     */
+                    if (pkt[0] != 0x00) {
+                        uint32_t wait_start = time_us();
+                        while ((time_us() - wait_start) < 500000u) {
+                            if (!usb_vendor_tx_busy()) break;
+                            usb_device_task();
+                        }
+                    }
+                }
+
+                usb_vendor_arm_rx();
             }
-
-            /* Rearmar EP1 OUT ahora que hemos terminado con la respuesta */
-            usb_vendor_arm_rx();
         }
 
-        /*
-         * Si llevan 5 segundos sin actividad y ya hemos recibido algún
-         * comando, entrar en el modo de diagnóstico por LED para poder
-         * depurar sin necesidad de un debugger.
-         */
+        /* Diagnóstico no bloqueante: tras 5 s sin comandos, muestra
+         * cmd_count como N destellos para identificar el último paso
+         * del saludo J-Link que se procesó. */
         if (cmd_count > 0 && (time_us() - last_activity_us) > 5000000u) {
-            uint32_t resets = usb_get_bus_reset_count() - bus_resets_at_start;
-            led_show_diagnostic(cmd_count, resets, first_cmd_byte, last_tx_ok);
-            /* No retorna nunca */
+            led_diagnostic_tick(cmd_count, last_cmd_byte);
         }
-
-        cdc_uart_task();
     }
 }

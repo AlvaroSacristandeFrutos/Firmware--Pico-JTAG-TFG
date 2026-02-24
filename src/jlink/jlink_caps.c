@@ -18,8 +18,14 @@ void jlink_cmd_version(uint8_t *tx_buf, uint16_t *tx_len) {
      * JLink Commander analiza el patrón "Vd.dd" para determinar la versión del firmware.
      * La cadena debe parecerse a la de un J-Link real para que la DLL la acepte.
      */
-    const char *ver = "J-Link V9.2 compiled " __DATE__ " " __TIME__;
-    uint16_t slen = (uint16_t)strlen(ver);
+    /*
+     * Cadena fija idéntica a la de un J-Link V9 real.
+     * - Formato "V9.20": la DLL espera al menos dos dígitos después del punto.
+     * - Fecha anterior a cualquier versión de JLink Commander → sin rechazo por fecha.
+     * - Longitud = strlen sin '\0': las implementaciones que funcionan no lo incluyen.
+     */
+    static const char ver[] = "J-Link V9.20 compiled Feb 27 2018 10:52:34";
+    uint16_t slen = (uint16_t)(sizeof(ver) - 1);  /* strlen, sin '\0' */
     tx_buf[0] = slen & 0xFF;
     tx_buf[1] = (slen >> 8) & 0xFF;
     memcpy(&tx_buf[2], ver, slen);
@@ -33,15 +39,21 @@ void jlink_cmd_get_caps(uint8_t *tx_buf, uint16_t *tx_len) {
     *tx_len = 4;
 }
 
-void jlink_cmd_get_caps_ex(uint8_t *tx_buf, uint16_t *tx_len) {
+void jlink_cmd_get_caps_ex(const uint8_t *rx_buf, uint16_t rx_len,
+                            uint8_t *tx_buf, uint16_t *tx_len) {
     /*
-     * Versión extendida: 32 bytes (256 bits) de capabilities.
-     * Los primeros 4 bytes son idénticos a GET_CAPS; el resto va a cero.
+     * Versión extendida: hasta 32 bytes (256 bits) de capabilities.
+     * Algunas versiones de la DLL mandan un byte opcional con el número
+     * de bytes a devolver (ej: 0xED 0x20 para 32 bytes).
+     * Si no hay parámetro, se devuelven los 32 bytes completos.
      */
-    memset(tx_buf, 0, 32);
+    uint16_t count = 32;
+    if (rx_len >= 2 && rx_buf[1] > 0 && rx_buf[1] <= 32)
+        count = rx_buf[1];
+    memset(tx_buf, 0, count);
     uint32_t caps = JLINK_CAPS;
-    memcpy(tx_buf, &caps, 4);
-    *tx_len = 32;
+    if (count >= 4) memcpy(tx_buf, &caps, 4);
+    *tx_len = count;
 }
 
 void jlink_cmd_get_hw_version(uint8_t *tx_buf, uint16_t *tx_len) {
@@ -51,14 +63,25 @@ void jlink_cmd_get_hw_version(uint8_t *tx_buf, uint16_t *tx_len) {
     *tx_len = 4;
 }
 
-void jlink_cmd_get_hw_info(uint8_t *tx_buf, uint16_t *tx_len) {
+void jlink_cmd_get_hw_info(const uint8_t *rx_buf, uint16_t rx_len,
+                            uint8_t *tx_buf, uint16_t *tx_len) {
     /*
-     * Respuesta: 4 × uint32 con información de alimentación y tensión.
-     * Campos: potencia objetivo, corriente, potencia de arranque, Vref en mV.
-     * Todo a cero hasta que se implemente la lectura ADC.
+     * Protocolo: Host → cmd(1) + mask(4 LE).
+     * Respuesta:  popcount(mask) × 4 bytes — un uint32 por cada bit activo.
+     * Si no llega la máscara, se asumen 4 campos (16 bytes) como fallback.
+     * Todos los valores a cero hasta que se implemente la lectura ADC.
      */
-    memset(tx_buf, 0, 16);
-    *tx_len = 16;
+    uint32_t mask = 0x0F;   /* fallback: 4 campos */
+    if (rx_len >= 5) {
+        mask = (uint32_t)rx_buf[1]
+             | ((uint32_t)rx_buf[2] << 8)
+             | ((uint32_t)rx_buf[3] << 16)
+             | ((uint32_t)rx_buf[4] << 24);
+    }
+    uint16_t n = (uint16_t)__builtin_popcount(mask) * 4;
+    if (n == 0) n = 4;      /* al menos un campo para no enviar 0 bytes */
+    memset(tx_buf, 0, n);
+    *tx_len = n;
 }
 
 void jlink_cmd_get_speeds(uint8_t *tx_buf, uint16_t *tx_len) {
@@ -185,4 +208,40 @@ void jlink_cmd_get_max_mem_block(uint8_t *tx_buf, uint16_t *tx_len) {
     uint32_t max_block = 1024;
     memcpy(tx_buf, &max_block, 4);
     *tx_len = 4;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Bloque de configuración del J-Link (256 bytes).                   */
+/*  Se inicializa a ceros (valores por defecto).                      */
+/*  jlink.sys escribe su config vía WRITE_CONFIG y la lee de vuelta   */
+/*  vía READ_CONFIG para validarla — necesitamos devolver exactamente */
+/*  lo que jlink.sys escribió, de lo contrario entra en bucle.        */
+/* ------------------------------------------------------------------ */
+static uint8_t jlink_config[256];
+
+void jlink_config_update(const uint8_t *data, uint16_t len) {
+    if (len > 256) len = 256;
+    memcpy(jlink_config, data, len);
+}
+
+/* ------------------------------------------------------------------ */
+/*  EMU_CMD_READ_CONFIG (0xF2)                                        */
+/*  Respuesta: 256 bytes con el bloque de configuración actual.       */
+/* ------------------------------------------------------------------ */
+void jlink_cmd_read_config(uint8_t *tx_buf, uint16_t *tx_len) {
+    memcpy(tx_buf, jlink_config, 256);
+    *tx_len = 256;
+}
+
+/* ------------------------------------------------------------------ */
+/*  EMU_CMD_WRITE_CONFIG (0xF3)                                       */
+/*  Petición: cmd(1) + config[256] = 257 bytes en total.             */
+/*  IMPORTANTE: este comando es multi-paquete (257 > 64 bytes).      */
+/*  La acumulación real se hace en main.c vía jlink_config_update().  */
+/*  Este handler se llama solo para el primer paquete (con 0xF3).    */
+/* ------------------------------------------------------------------ */
+void jlink_cmd_write_config(const uint8_t *rx_buf, uint16_t rx_len,
+                             uint8_t *tx_buf, uint16_t *tx_len) {
+    (void)rx_buf; (void)rx_len; (void)tx_buf;
+    *tx_len = 0;  /* Sin respuesta; la acumulación la gestiona main.c */
 }

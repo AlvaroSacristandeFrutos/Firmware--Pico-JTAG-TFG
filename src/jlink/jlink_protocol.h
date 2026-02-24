@@ -68,6 +68,8 @@
 /* Capabilities que este probe anuncia como implementadas */
 #define JLINK_CAPS  (EMU_CAP_RESERVED_1       | \
                      EMU_CAP_GET_HW_VERSION   | \
+                     EMU_CAP_READ_CONFIG      | \
+                     EMU_CAP_WRITE_CONFIG     | \
                      EMU_CAP_GET_SPEEDS       | \
                      EMU_CAP_GET_MAX_BLOCK_SIZE | \
                      EMU_CAP_GET_HW_INFO      | \
@@ -95,8 +97,8 @@
 #define JLINK_USB_PID       0xD0DAu
 
 /* ---- Endpoints USB ---- */
-#define JLINK_EP_OUT        0x01    /* host → probe (bulk OUT) */
-#define JLINK_EP_IN         0x81    /* probe → host (bulk IN)  */
+#define JLINK_EP_OUT        0x01    /* host → probe (bulk OUT, EP1) */
+#define JLINK_EP_IN         0x81    /* probe → host (interrupt IN, EP1 — igual que un J-Link real) */
 
 /* ---- Tamaños de buffer ---- */
 #define CMD_BUF_COUNT       4

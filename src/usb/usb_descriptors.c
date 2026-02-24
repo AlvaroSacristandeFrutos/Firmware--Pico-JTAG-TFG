@@ -20,7 +20,8 @@
 void ep0_in_handler(uint8_t *buf, uint16_t len);
 void ep0_out_handler(uint8_t *buf, uint16_t len);
 void ep1_out_handler(uint8_t *buf, uint16_t len);
-void ep2_in_handler(uint8_t *buf, uint16_t len);
+void ep1_in_handler(uint8_t *buf, uint16_t len);   /* EP1 IN interrupt (0x81) — stub de detección */
+void ep2_in_handler(uint8_t *buf, uint16_t len);   /* EP2 IN bulk    (0x82) — respuestas J-Link  */
 
 /* ---------------------------------------------------------------------- */
 /*  Descriptores de endpoint                                               */
@@ -44,21 +45,36 @@ static const struct usb_endpoint_descriptor ep0_in = {
     .bInterval        = 0
 };
 
-/* EP1 OUT — el host envía comandos J-Link por aquí */
+/* EP1 OUT — el host envía comandos J-Link por aquí.
+ * BULK: jlink.sys abre un pipe bulk para escribir comandos.
+ * El J-Link real usa endpoints ASIMÉTRICOS: BULK OUT + INTERRUPT IN. */
 static const struct usb_endpoint_descriptor ep1_out = {
     .bLength          = sizeof(struct usb_endpoint_descriptor),
     .bDescriptorType  = USB_DT_ENDPOINT,
     .bEndpointAddress = EP1_OUT_ADDR,
     .bmAttributes     = USB_TRANSFER_TYPE_BULK,
     .wMaxPacketSize   = 64,
-    .bInterval        = 0
+    .bInterval        = 0   /* los endpoints bulk ignoran bInterval */
 };
 
-/* EP1 IN — el probe envía respuestas al host por aquí */
+/* EP1 IN — interrupt (0x81). jlink.sys comprueba su presencia para decidir
+ * si entrar en modo de comandos (bulk OUT). No transporta respuestas J-Link;
+ * esas van por EP2 IN. Nunca se arma en operación normal → siempre NAK. */
 static const struct usb_endpoint_descriptor ep1_in = {
     .bLength          = sizeof(struct usb_endpoint_descriptor),
     .bDescriptorType  = USB_DT_ENDPOINT,
     .bEndpointAddress = EP1_IN_ADDR,
+    .bmAttributes     = USB_TRANSFER_TYPE_INTERRUPT,
+    .wMaxPacketSize   = 64,
+    .bInterval        = 1
+};
+
+/* EP2 IN — bulk (0x82). Canal primario de respuestas J-Link (igual que el
+ * hardware real). jlink.sys lee aquí las respuestas a sus comandos bulk OUT. */
+static const struct usb_endpoint_descriptor ep2_in = {
+    .bLength          = sizeof(struct usb_endpoint_descriptor),
+    .bDescriptorType  = USB_DT_ENDPOINT,
+    .bEndpointAddress = EP2_IN_ADDR,
     .bmAttributes     = USB_TRANSFER_TYPE_BULK,
     .wMaxPacketSize   = 64,
     .bInterval        = 0
@@ -71,13 +87,13 @@ static const struct usb_endpoint_descriptor ep1_in = {
 static const struct usb_device_descriptor device_descriptor = {
     .bLength            = sizeof(struct usb_device_descriptor),
     .bDescriptorType    = USB_DT_DEVICE,
-    .bcdUSB             = 0x0200,   /* USB 2.0, igual que un J-Link real */
+    .bcdUSB             = 0x0200,   /* USB 2.0 — jlink.sys carga por INF, no necesita BOS */
     .bDeviceClass       = 0x00,     /* Clase definida por la interfaz */
     .bDeviceSubClass    = 0x00,
     .bDeviceProtocol    = 0x00,
     .bMaxPacketSize0    = 64,
-    .idVendor           = 0x1366,   /* SEGGER — temporal para validar el protocolo */
-    .idProduct          = 0x0101,   /* J-Link — temporal para validar el protocolo */
+    .idVendor           = 0x1366,   /* Segger Microteq */
+    .idProduct          = 0x0101,   /* J-Link — jlink.sys lo reconoce por este VID/PID */
     .bcdDevice          = 0x0100,   /* Versión de dispositivo 1.0 */
     .iManufacturer      = 1,
     .iProduct           = 2,
@@ -94,10 +110,10 @@ static const struct usb_interface_descriptor interface_descriptor = {
     .bDescriptorType    = USB_DT_INTERFACE,
     .bInterfaceNumber   = 0,
     .bAlternateSetting  = 0,
-    .bNumEndpoints      = 2,        /* EP1 OUT + EP1 IN */
-    .bInterfaceClass    = 0xFF,     /* Vendor specific */
-    .bInterfaceSubClass = 0x00,
-    .bInterfaceProtocol = 0x00,
+    .bNumEndpoints      = 3,        /* EP1 OUT + EP1 IN interrupt + EP2 IN bulk */
+    .bInterfaceClass    = 0xFF,     /* Vendor specific — igual que J-Link real */
+    .bInterfaceSubClass = 0xFF,     /* Vendor specific — jlink.sys verifica este campo */
+    .bInterfaceProtocol = 0xFF,     /* Vendor specific — jlink.sys verifica este campo */
     .iInterface         = 0
 };
 
@@ -110,8 +126,9 @@ static const struct usb_configuration_descriptor config_descriptor = {
     .bDescriptorType     = USB_DT_CONFIG,
     .wTotalLength        = sizeof(struct usb_configuration_descriptor) +
                            sizeof(struct usb_interface_descriptor) +
-                           sizeof(struct usb_endpoint_descriptor) +
-                           sizeof(struct usb_endpoint_descriptor),
+                           sizeof(struct usb_endpoint_descriptor) +   /* EP1 OUT */
+                           sizeof(struct usb_endpoint_descriptor) +   /* EP1 IN  */
+                           sizeof(struct usb_endpoint_descriptor),    /* EP2 IN  */
     .bNumInterfaces      = 1,
     .bConfigurationValue = 1,
     .iConfiguration      = 0,
@@ -139,8 +156,8 @@ static const unsigned char lang_descriptor[] = {
 static char serial_string[12];
 
 static const unsigned char *descriptor_strings[] = {
-    (const unsigned char *)"SEGGER",               /* Índice 1: Fabricante */
-    (const unsigned char *)"J-Link",               /* Índice 2: Producto */
+    (const unsigned char *)"SEGGER",                /* Índice 1: Fabricante */
+    (const unsigned char *)"J-Link",                /* Índice 2: Producto */
     (const unsigned char *)serial_string            /* Índice 3: Número de serie */
 };
 
@@ -241,12 +258,20 @@ struct usb_device_configuration dev_config = {
             .buffer_control   = &usb_dpram->ep_buf_ctrl[1].out,
             .data_buffer      = &usb_dpram->epx_data[0 * 64],
         },
-        {   /* EP1 IN — respuestas del probe al host */
+        {   /* EP1 IN — interrupt (0x81): sólo sirve para que jlink.sys detecte modo comandos.
+             * Nunca se arma; ep1_in_handler es un stub que no se invocará. */
             .descriptor       = &ep1_in,
-            .handler          = &ep2_in_handler,  /* ver nota sobre el nombre en usb_device.c */
+            .handler          = &ep1_in_handler,
             .endpoint_control = &usb_dpram->ep_ctrl[0].in,
             .buffer_control   = &usb_dpram->ep_buf_ctrl[1].in,
             .data_buffer      = &usb_dpram->epx_data[1 * 64],
+        },
+        {   /* EP2 IN — bulk (0x82): canal primario de respuestas J-Link → host. */
+            .descriptor       = &ep2_in,
+            .handler          = &ep2_in_handler,
+            .endpoint_control = &usb_dpram->ep_ctrl[1].in,
+            .buffer_control   = &usb_dpram->ep_buf_ctrl[2].in,
+            .data_buffer      = &usb_dpram->epx_data[2 * 64],
         }
     }
 };

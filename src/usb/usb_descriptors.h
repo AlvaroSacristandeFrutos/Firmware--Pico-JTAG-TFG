@@ -40,8 +40,9 @@ struct usb_device_configuration {
 /* ---- Endpoint addresses ---- */
 #define EP0_IN_ADDR   (USB_DIR_IN  | 0)
 #define EP0_OUT_ADDR  (USB_DIR_OUT | 0)
-#define EP1_OUT_ADDR  (USB_DIR_OUT | 1)
-#define EP1_IN_ADDR   (USB_DIR_IN  | 1)
+#define EP1_OUT_ADDR  (USB_DIR_OUT | 1)   /* comandos host → probe (0x01) */
+#define EP1_IN_ADDR   (USB_DIR_IN  | 1)   /* interrupt IN (0x81): jlink.sys lo exige para activar modo comandos */
+#define EP2_IN_ADDR   (USB_DIR_IN  | 2)   /* respuestas bulk probe → host (0x82) — igual que J-Link real */
 
 /* ---- Extern declarations ---- */
 extern struct usb_device_configuration dev_config;
@@ -63,6 +64,6 @@ extern const uint8_t  ms_os_20_descriptor_set[];
 extern const uint16_t ms_os_20_descriptor_set_len;
 
 /* Vendor request code for MS OS 2.0 descriptor set */
-#define MS_OS_20_VENDOR_CODE  0x01
+#define MS_OS_20_VENDOR_CODE  0xBF   /* Código vendor para MS OS 2.0 — debe ser != EMU_CMD_VERSION (0x01) */
 
 #endif /* USB_DESCRIPTORS_H */
