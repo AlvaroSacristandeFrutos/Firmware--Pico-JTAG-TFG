@@ -10,24 +10,34 @@
 #include <stdint.h>
 
 /* ---- Interfaz JTAG (conectada directamente a PIO0) ---- */
-#define PIN_TDI         16
-#define PIN_TDO         17
-#define PIN_TCK         18
-#define PIN_TMS         19
+#define PIN_TDI         16   /* GP16 — TDI_OUT al nivel-shifter */
+#define PIN_TDO         17   /* GP17 — TDO_IN desde el nivel-shifter */
+#define PIN_TCK         18   /* GP18 — TCK_OUT al nivel-shifter */
+#define PIN_TMS         19   /* GP19 — TMS_OUT al nivel-shifter */
 
 /* ---- Líneas de reset del objetivo (activas a nivel bajo) ---- */
-#define PIN_RST         20
-#define PIN_TRST        21
+#define PIN_RST         20   /* GP20 — nRST del objetivo */
+#define PIN_TRST        21   /* GP21 — nTRST del objetivo */
+
+/* ---- Control del nivel-shifter ---- */
+#define PIN_CTRL_OE     22   /* GP22 — /OE del level-shifter (activo LOW = habilitado) */
+
+/* ---- Read-back de señales de salida (tras el nivel-shifter) ---- */
+#define PIN_TDI_RD       6   /* GP6  — lectura real de TDI (para GET_STATE) */
+#define PIN_TCK_RD       7   /* GP7  — lectura real de TCK */
+#define PIN_TMS_RD       8   /* GP8  — lectura real de TMS */
 
 /* ---- Puente UART (UART0) ---- */
 #define PIN_UART_TX     12
 #define PIN_UART_RX     13
 
-/* ---- LED de estado (LED integrado de la Pico, activo a nivel alto) ---- */
-#define PIN_LED         25
+/* ---- LEDs externos del PCB (activos a nivel alto) ---- */
+#define PIN_LED         14   /* GP14 — LED verde (estado general) */
+#define PIN_LED_RED     15   /* GP15 — LED rojo (error / actividad JTAG) */
+#define PIN_LED_ONBOARD 25   /* GP25 — LED onboard de la Pico (depuración) */
 
 /* ---- Lectura analógica de tensión ---- */
-#define PIN_VREF_ADC    26   /* ADC0 — tensión de referencia del objetivo / 2 */
+#define PIN_VREF_ADC    26   /* GP26 / ADC0 — tensión de referencia del objetivo / 2 */
 #define ADC_CHANNEL     0
 
 /* ---- Máscaras de conveniencia para operaciones sobre varios pines ---- */

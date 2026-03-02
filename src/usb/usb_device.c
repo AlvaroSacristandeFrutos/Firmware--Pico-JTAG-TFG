@@ -5,10 +5,12 @@
  *
  * Cambios respecto al original:
  *   - Eliminado todo uso de printf/stdio (no hay UART disponible)
- *   - Añadida API de lectura/escritura para el endpoint bulk de vendor (EP1)
+ *   - Añadida API de lectura/escritura para el endpoint bulk de vendor (EP3)
  *   - Número de serie generado desde el ID único de flash
  *   - STALL para peticiones no soportadas
  *   - Escritura en dos pasos de buffer_control (workaround RP2040-E5)
+ *   - Soporte multi-paquete en EP0 para descriptores > 64 bytes
+ *   - Handlers de endpoints CDC (no-op)
  */
 
 #include "usb_device.h"
@@ -22,7 +24,6 @@
 #include "hardware/resets.h"
 #include "pico/time.h"
 
-/* Alias de los registros USB para escritura atómica (set/clear por separado) */
 #define usb_hw_set   ((usb_hw_t *)hw_set_alias_untyped(usb_hw))
 #define usb_hw_clear ((usb_hw_t *)hw_clear_alias_untyped(usb_hw))
 
@@ -30,17 +31,23 @@
 /*  Estado interno del controlador                                         */
 /* ---------------------------------------------------------------------- */
 
-/* Dirección USB — se aplica después de que EP0 IN confirme el ACK */
 static bool     should_set_address = false;
 static uint8_t  dev_addr = 0;
 
 static volatile bool configured = false;
-static volatile bool enumerated = false;   /* true tras aplicar SET_ADDRESS */
+static volatile bool enumerated = false;
 
-/* Buffer temporal para ensamblar respuestas de EP0 (descriptores, etc.) */
-static uint8_t ep0_buf[64];
+/*
+ * Buffer para transferencias EP0 IN multi-paquete.
+ * 128 bytes: suficiente para el descriptor de configuración completo (98 bytes).
+ * Para cada GET_DESCRIPTOR, copiamos los datos aquí y enviamos en trozos
+ * de 64 bytes desde ep0_in_handler hasta agotar ep0_pending_total.
+ */
+static uint8_t  ep0_pending_buf[128];
+static uint16_t ep0_pending_total = 0;   /* bytes totales a enviar */
+static uint16_t ep0_pending_sent  = 0;   /* bytes ya enviados */
 
-/* Estado del endpoint bulk de vendor (EP1) */
+/* Estado del endpoint bulk de vendor (EP3) */
 static volatile bool     vendor_rx_ready = false;
 static volatile uint16_t vendor_rx_len   = 0;
 static uint8_t           vendor_rx_buf[64];
@@ -50,13 +57,10 @@ static volatile bool     vendor_tx_busy  = false;
 /*  Funciones auxiliares                                                   */
 /* ---------------------------------------------------------------------- */
 
-/* Convierte un puntero a la DPRAM en un offset desde la base de la DPRAM.
- * El hardware necesita offsets, no direcciones absolutas. */
 static inline uint32_t usb_buffer_offset(volatile uint8_t *buf) {
     return (uint32_t)buf ^ (uint32_t)usb_dpram;
 }
 
-/* Devuelve true si el endpoint es de entrada (dispositivo → host). */
 static inline bool ep_is_tx(struct usb_endpoint_configuration *ep) {
     return ep->descriptor->bEndpointAddress & USB_DIR_IN;
 }
@@ -76,11 +80,8 @@ struct usb_endpoint_configuration *usb_get_endpoint_configuration(uint8_t addr) 
     return NULL;
 }
 
-/* Escribe el registro de control de endpoint para un endpoint no-EP0.
- * EP0 no tiene registro de control propio — se omite si endpoint_control es NULL. */
 static void usb_setup_endpoint(const struct usb_endpoint_configuration *ep) {
     if (!ep->endpoint_control) return;
-
     uint32_t dpram_offset = usb_buffer_offset(ep->data_buffer);
     uint32_t reg = EP_CTRL_ENABLE_BITS
                  | EP_CTRL_INTERRUPT_PER_BUFFER
@@ -89,7 +90,6 @@ static void usb_setup_endpoint(const struct usb_endpoint_configuration *ep) {
     *ep->endpoint_control = reg;
 }
 
-/* Configura todos los endpoints que tienen descriptor y handler asignados. */
 static void usb_setup_endpoints(void) {
     const struct usb_endpoint_configuration *endpoints = dev_config.endpoints;
     for (int i = 0; i < USB_NUM_ENDPOINTS; i++) {
@@ -108,120 +108,105 @@ void usb_start_transfer(struct usb_endpoint_configuration *ep,
     uint32_t val = len | USB_BUF_CTRL_AVAIL;
 
     if (ep_is_tx(ep)) {
-        /* Para transferencias de salida, copiar los datos a la DPRAM primero */
         if (len > 0) {
             memcpy((void *)ep->data_buffer, buf, len);
         }
         val |= USB_BUF_CTRL_FULL;
     }
 
-    /* Alternar el PID (DATA0/DATA1) para control de flujo USB */
     val |= ep->next_pid ? USB_BUF_CTRL_DATA1_PID : USB_BUF_CTRL_DATA0_PID;
     ep->next_pid ^= 1u;
 
-    /*
-     * Workaround RP2040-E5: el bit AVAIL no puede escribirse en el mismo
-     * ciclo que los demás campos de buffer_control. Se escribe primero todo
-     * sin AVAIL, se esperan al menos 12 ciclos a que la DPRAM propague el
-     * valor, y luego se activa AVAIL por separado.
-     */
+    /* Workaround RP2040-E5 */
     *ep->buffer_control = val & ~USB_BUF_CTRL_AVAIL;
     busy_wait_at_least_cycles(12);
     *ep->buffer_control = val;
 }
 
-/* Declaración adelantada */
 static void usb_stall_ep0_in(void);
+
+/* ---------------------------------------------------------------------- */
+/*  Transferencias EP0 IN multi-paquete                                   */
+/* ---------------------------------------------------------------------- */
+
+/*
+ * Inicia una transferencia EP0 IN, posiblemente mayor que 64 bytes.
+ * Copia los datos en ep0_pending_buf y envía el primer trozo de 64 bytes.
+ * ep0_in_handler continúa enviando trozos hasta completar la transferencia.
+ */
+static void usb_ep0_in_begin(const uint8_t *data, uint16_t total, uint16_t wLength) {
+    if (total > wLength)             total = wLength;
+    if (total > sizeof(ep0_pending_buf)) total = sizeof(ep0_pending_buf);
+
+    if (total > 0) memcpy(ep0_pending_buf, data, total);
+    ep0_pending_total = total;
+    ep0_pending_sent  = 0;
+
+    uint16_t first = (total > 64) ? 64 : total;
+    struct usb_endpoint_configuration *ep = usb_get_endpoint_configuration(EP0_IN_ADDR);
+    ep->next_pid = 1;
+    usb_start_transfer(ep, ep0_pending_buf, first);
+    ep0_pending_sent = first;
+}
 
 /* ---------------------------------------------------------------------- */
 /*  Gestión de descriptores (respuestas a GET_DESCRIPTOR en EP0)          */
 /* ---------------------------------------------------------------------- */
 
 static void usb_handle_device_descriptor(volatile struct usb_setup_packet *pkt) {
-    const struct usb_device_descriptor *d = dev_config.device_descriptor;
-    struct usb_endpoint_configuration *ep = usb_get_endpoint_configuration(EP0_IN_ADDR);
-    ep->next_pid = 1;
-    uint16_t len = sizeof(struct usb_device_descriptor);
-    if (len > pkt->wLength) len = pkt->wLength;
-    usb_start_transfer(ep, (uint8_t *)d, len);
+    usb_ep0_in_begin((const uint8_t *)dev_config.device_descriptor,
+                     sizeof(struct usb_device_descriptor),
+                     pkt->wLength);
 }
 
 static void usb_handle_config_descriptor(volatile struct usb_setup_packet *pkt) {
-    uint8_t *buf = &ep0_buf[0];
-
-    /* El descriptor de configuración va seguido del de interfaz y los de endpoint */
-    const struct usb_configuration_descriptor *d = dev_config.config_descriptor;
-    memcpy(buf, d, sizeof(struct usb_configuration_descriptor));
-    buf += sizeof(struct usb_configuration_descriptor);
-
-    if (pkt->wLength >= d->wTotalLength) {
-        memcpy(buf, dev_config.interface_descriptor,
-               sizeof(struct usb_interface_descriptor));
-        buf += sizeof(struct usb_interface_descriptor);
-
-        /* Añadir todos los endpoints no-EP0 que tengan descriptor */
-        const struct usb_endpoint_configuration *eps = dev_config.endpoints;
-        for (uint i = 2; i < USB_NUM_ENDPOINTS; i++) {
-            if (eps[i].descriptor) {
-                memcpy(buf, eps[i].descriptor,
-                       sizeof(struct usb_endpoint_descriptor));
-                buf += sizeof(struct usb_endpoint_descriptor);
-            }
-        }
-    }
-
-    uint32_t len = (uint32_t)buf - (uint32_t)&ep0_buf[0];
-    if (len > pkt->wLength) len = pkt->wLength;
-    struct usb_endpoint_configuration *ep = usb_get_endpoint_configuration(EP0_IN_ADDR);
-    ep->next_pid = 1;
-    usb_start_transfer(ep, &ep0_buf[0], (uint16_t)len);
+    usb_ep0_in_begin(dev_config.config_desc_full,
+                     dev_config.config_desc_len,
+                     pkt->wLength);
 }
 
 #define DESCRIPTOR_STRING_COUNT 3
 
 static void usb_handle_string_descriptor(volatile struct usb_setup_packet *pkt) {
     uint8_t i = pkt->wValue & 0xff;
+    uint8_t tmp[64];
     uint8_t len = 0;
 
     if (i == 0) {
-        /* Índice 0: descriptor de idioma */
         len = 4;
-        memcpy(&ep0_buf[0], dev_config.lang_descriptor, len);
+        memcpy(tmp, dev_config.lang_descriptor, len);
     } else if (i <= DESCRIPTOR_STRING_COUNT) {
         len = usb_prepare_string_descriptor(
-                  dev_config.descriptor_strings[i - 1], &ep0_buf[0]);
+                  dev_config.descriptor_strings[i - 1], tmp);
     } else {
-        /* Índice desconocido — responder con STALL */
         usb_stall_ep0_in();
         return;
     }
 
-    uint16_t send_len = len;
-    if (send_len > pkt->wLength) send_len = pkt->wLength;
-    struct usb_endpoint_configuration *ep = usb_get_endpoint_configuration(EP0_IN_ADDR);
-    ep->next_pid = 1;
-    usb_start_transfer(ep, &ep0_buf[0], send_len);
+    usb_ep0_in_begin(tmp, len, pkt->wLength);
 }
 
 /* ---------------------------------------------------------------------- */
 /*  Gestión de paquetes SETUP                                              */
 /* ---------------------------------------------------------------------- */
 
-/* Envía un ACK de longitud cero en EP0 IN (confirma una petición OUT) */
 static void usb_acknowledge_out_request(void) {
-    usb_start_transfer(usb_get_endpoint_configuration(EP0_IN_ADDR), NULL, 0);
+    ep0_pending_total = 0;
+    ep0_pending_sent  = 0;
+    struct usb_endpoint_configuration *ep = usb_get_endpoint_configuration(EP0_IN_ADDR);
+    ep->next_pid = 1;
+    usb_start_transfer(ep, NULL, 0);
 }
 
-/* Activa STALL en EP0 IN para rechazar peticiones no soportadas */
 static void usb_stall_ep0_in(void) {
+    ep0_pending_total = 0;
+    ep0_pending_sent  = 0;
     usb_hw_set->ep_stall_arm = USB_EP_STALL_ARM_EP0_IN_BITS;
     struct usb_endpoint_configuration *ep = usb_get_endpoint_configuration(EP0_IN_ADDR);
     *ep->buffer_control = USB_BUF_CTRL_STALL;
 }
 
 static void usb_set_device_address(volatile struct usb_setup_packet *pkt) {
-    /* Guardamos la dirección pero la aplicamos después del ACK (en ep0_in_handler),
-     * tal como exige la especificación USB 2.0 §9.4.6. */
     dev_addr = (uint8_t)(pkt->wValue & 0xff);
     should_set_address = true;
     usb_acknowledge_out_request();
@@ -240,14 +225,15 @@ static void usb_set_device_configuration(volatile struct usb_setup_packet *pkt) 
     usb_acknowledge_out_request();
     configured = true;
 
-    /* La especificación USB exige resetear los toggles de DATA a DATA0
-     * en cada SET_CONFIGURATION. */
     usb_reset_endpoint_pids();
     vendor_rx_ready = false;
-    vendor_tx_busy = false;
+    vendor_tx_busy  = false;
 
-    /* Armar EP1 OUT para que el host pueda enviar el primer comando */
+    /* Armar EP3 OUT (J-Link): el host puede enviar el primer comando */
     usb_start_transfer(usb_get_endpoint_configuration(EP1_OUT_ADDR), NULL, 64);
+
+    /* Armar EP1 OUT (CDC data): listo para absorber datos del host */
+    usb_start_transfer(usb_get_endpoint_configuration(CDC_EP_DATA_OUT), NULL, 64);
 }
 
 static void usb_handle_clear_feature(volatile struct usb_setup_packet *pkt) {
@@ -258,13 +244,20 @@ static void usb_handle_clear_feature(volatile struct usb_setup_packet *pkt) {
         uint8_t ep_addr = (uint8_t)(pkt->wIndex & 0xFF);
         struct usb_endpoint_configuration *ep = usb_get_endpoint_configuration(ep_addr);
         if (ep) {
-            /* CLEAR_FEATURE/ENDPOINT_HALT resetea el toggle y rearma el endpoint */
             ep->next_pid = 0;
             if (!(ep_addr & USB_DIR_IN)) {
-                vendor_rx_ready = false;
-                usb_start_transfer(ep, NULL, 64);
+                if (ep_addr == EP1_OUT_ADDR) {
+                    /* J-Link OUT */
+                    vendor_rx_ready = false;
+                    usb_start_transfer(ep, NULL, 64);
+                } else if (ep_addr == CDC_EP_DATA_OUT) {
+                    /* CDC data OUT — re-armar para absorber datos */
+                    usb_start_transfer(ep, NULL, 64);
+                }
             } else {
-                vendor_tx_busy = false;
+                if (ep_addr == EP2_IN_ADDR) {
+                    vendor_tx_busy = false;
+                }
             }
         }
     }
@@ -279,28 +272,18 @@ static void usb_handle_setup_packet(void) {
 
     usb_get_endpoint_configuration(EP0_IN_ADDR)->next_pid = 1u;
 
-    /*
-     * Petición de vendor para el descriptor MS OS 2.0.
-     * Windows la genera automáticamente cuando ve el BOS descriptor con la
-     * capability de plataforma MS OS 2.0. La respuesta indica qué driver
-     * cargar (WinUSB en nuestro caso cuando usamos nuestro propio VID/PID).
-     */
+    /* Petición de vendor para el descriptor MS OS 2.0 */
     if ((req_direction & USB_DIR_IN) &&
         (req_direction & USB_REQ_TYPE_TYPE_MASK) == USB_REQ_TYPE_TYPE_VENDOR &&
         req == MS_OS_20_VENDOR_CODE &&
         pkt->wIndex == 0x07) {
-        uint16_t len = ms_os_20_descriptor_set_len;
-        if (len > pkt->wLength) len = pkt->wLength;
-        memcpy(&ep0_buf[0], ms_os_20_descriptor_set, len);
-        struct usb_endpoint_configuration *ep =
-            usb_get_endpoint_configuration(EP0_IN_ADDR);
-        ep->next_pid = 1;
-        usb_start_transfer(ep, &ep0_buf[0], len);
+        usb_ep0_in_begin(ms_os_20_descriptor_set,
+                         ms_os_20_descriptor_set_len,
+                         pkt->wLength);
         return;
     }
 
     if (!(req_direction & USB_DIR_IN)) {
-        /* Peticiones estándar de salida (host → dispositivo) */
         if (req == USB_REQUEST_SET_ADDRESS) {
             usb_set_device_address(pkt);
         } else if (req == USB_REQUEST_SET_CONFIGURATION) {
@@ -308,10 +291,11 @@ static void usb_handle_setup_packet(void) {
         } else if (req == USB_REQUEST_CLEAR_FEATURE) {
             usb_handle_clear_feature(pkt);
         } else {
+            /* Peticiones de clase CDC (SET_LINE_CODING, SET_CONTROL_LINE_STATE…)
+             * y cualquier otro OUT desconocido → ACK con ZLP */
             usb_acknowledge_out_request();
         }
     } else {
-        /* Peticiones estándar de entrada (dispositivo → host) */
         if (req == USB_REQUEST_GET_DESCRIPTOR) {
             uint16_t descriptor_type = pkt->wValue >> 8;
             switch (descriptor_type) {
@@ -324,18 +308,9 @@ static void usb_handle_setup_packet(void) {
             case USB_DT_STRING:
                 usb_handle_string_descriptor(pkt);
                 break;
-            case USB_DT_BOS: {
-                /* El BOS descriptor es necesario para que Windows descubra
-                 * la capability MS OS 2.0 y nos asigne WinUSB automáticamente */
-                uint16_t len = bos_descriptor_len;
-                if (len > pkt->wLength) len = pkt->wLength;
-                memcpy(&ep0_buf[0], bos_descriptor, len);
-                struct usb_endpoint_configuration *ep =
-                    usb_get_endpoint_configuration(EP0_IN_ADDR);
-                ep->next_pid = 1;
-                usb_start_transfer(ep, &ep0_buf[0], len);
+            case USB_DT_BOS:
+                usb_ep0_in_begin(bos_descriptor, bos_descriptor_len, pkt->wLength);
                 break;
-            }
             default:
                 usb_stall_ep0_in();
                 break;
@@ -347,7 +322,7 @@ static void usb_handle_setup_packet(void) {
 }
 
 /* ---------------------------------------------------------------------- */
-/*  Gestión del buffer status (notificación de transferencias completadas) */
+/*  Gestión del buffer status                                              */
 /* ---------------------------------------------------------------------- */
 
 static void usb_handle_ep_buff_done(struct usb_endpoint_configuration *ep) {
@@ -369,8 +344,6 @@ static void usb_handle_buff_done(uint ep_num, bool in) {
     }
 }
 
-/* El registro buf_status tiene un bit por cada endpoint (IN y OUT separados).
- * Iteramos todos los bits activos, limpiamos cada uno y llamamos al handler. */
 static void usb_handle_buff_status(uint32_t buffers) {
     uint32_t remaining = buffers;
     uint32_t bit = 1u;
@@ -397,21 +370,11 @@ static void usb_bus_reset(void) {
     usb_hw->dev_addr_ctrl = 0;
     configured = false;
 
-    /*
-     * Intencionadamente NO limpiamos 'enumerated' aquí. Ese flag solo sirve
-     * para el bucle de espera en main() y debe ponerse a true exactamente
-     * una vez. Si lo limpiáramos en cada reset de bus, main() podría no
-     * verlo nunca si el host resetea el bus justo después de SET_ADDRESS.
-     */
-    vendor_rx_ready = false;
-    vendor_tx_busy = false;
+    ep0_pending_total = 0;
+    ep0_pending_sent  = 0;
+    vendor_rx_ready   = false;
+    vendor_tx_busy    = false;
 
-    /*
-     * Resetear los toggles PID de TODOS los endpoints (USB 2.0 §9.4.6):
-     * tras un bus reset tanto el host como el dispositivo vuelven a DATA0.
-     * Si no se hace, la segunda sesión libusb (que reinicia su toggle a DATA0)
-     * choca con el device que espera DATA1 del ciclo anterior.
-     */
     for (int i = 0; i < USB_NUM_ENDPOINTS; i++) {
         if (dev_config.endpoints[i].descriptor)
             dev_config.endpoints[i].next_pid = 0;
@@ -428,16 +391,29 @@ uint32_t usb_get_bus_reset_count(void) {
 
 void ep0_in_handler(uint8_t *buf, uint16_t len) {
     (void)buf; (void)len;
+
     if (should_set_address) {
-        /* Aplicar la dirección USB ahora que el ACK se ha enviado */
         usb_hw->dev_addr_ctrl = dev_addr;
-        should_set_address = false;
-        enumerated = true;
-    } else {
-        /* Preparar EP0 OUT para el siguiente paquete de control */
+        should_set_address    = false;
+        enumerated            = true;
+        ep0_pending_total     = 0;
+        ep0_pending_sent      = 0;
+        return;
+    }
+
+    if (ep0_pending_sent < ep0_pending_total) {
+        /* Hay más datos: enviar el siguiente trozo */
+        uint16_t remaining = ep0_pending_total - ep0_pending_sent;
+        uint16_t chunk     = (remaining > 64) ? 64 : remaining;
         struct usb_endpoint_configuration *ep =
-            usb_get_endpoint_configuration(EP0_OUT_ADDR);
-        usb_start_transfer(ep, NULL, 0);
+            usb_get_endpoint_configuration(EP0_IN_ADDR);
+        usb_start_transfer(ep, &ep0_pending_buf[ep0_pending_sent], chunk);
+        ep0_pending_sent += chunk;
+    } else {
+        /* Transferencia completa: armar EP0 OUT para la fase STATUS */
+        ep0_pending_total = 0;
+        ep0_pending_sent  = 0;
+        usb_start_transfer(usb_get_endpoint_configuration(EP0_OUT_ADDR), NULL, 0);
     }
 }
 
@@ -445,32 +421,37 @@ void ep0_out_handler(uint8_t *buf, uint16_t len) {
     (void)buf; (void)len;
 }
 
-/* Handler para EP1 OUT: el host ha enviado un comando J-Link.
- * Copiamos los datos al buffer interno y señalamos que hay datos disponibles. */
+/* EP3 OUT (0x03): el host envía un comando J-Link */
 void ep1_out_handler(uint8_t *buf, uint16_t len) {
     if (len > 64) len = 64;
     memcpy(vendor_rx_buf, buf, len);
-    vendor_rx_len = len;
+    vendor_rx_len   = len;
     vendor_rx_ready = true;
 }
 
-/*
- * Handler para EP1 IN (0x81, interrupt).
- * Solo está presente en el descriptor para que jlink.sys entre en modo
- * de comandos bulk. Nunca se arma; jlink.sys no lee respuestas aquí.
- */
-void ep1_in_handler(uint8_t *buf, uint16_t len) {
-    (void)buf; (void)len;
-}
-
-/*
- * Handler para EP2 IN (0x82, bulk).
- * Canal principal de respuestas J-Link: jlink.sys lee aquí las respuestas
- * a sus comandos (igual que el hardware J-Link V9 real).
- */
+/* EP3 IN (0x83): la respuesta J-Link se ha enviado al host */
 void ep2_in_handler(uint8_t *buf, uint16_t len) {
     (void)buf; (void)len;
     vendor_tx_busy = false;
+}
+
+/* EP1 IN (0x81): CDC notificaciones — nunca se arma, handler por completitud */
+void cdc_notify_in_handler(uint8_t *buf, uint16_t len) {
+    (void)buf; (void)len;
+}
+
+/* EP1 OUT (0x01): datos CDC del host — absorber y re-armar */
+void cdc_data_out_handler(uint8_t *buf, uint16_t len) {
+    (void)buf; (void)len;
+    /* Descartar los datos y re-armar para que el host no se bloquee */
+    struct usb_endpoint_configuration *ep =
+        usb_get_endpoint_configuration(CDC_EP_DATA_OUT);
+    if (ep) usb_start_transfer(ep, NULL, 64);
+}
+
+/* EP2 IN (0x82): datos CDC al host — nunca se arma, handler por completitud */
+void cdc_data_in_handler(uint8_t *buf, uint16_t len) {
+    (void)buf; (void)len;
 }
 
 /* ---------------------------------------------------------------------- */
@@ -502,27 +483,21 @@ static void isr_usbctrl(void) {
 void usb_device_init(void) {
     usb_descriptors_init();
 
-    /* Resetear y liberar el controlador USB */
     reset_block(RESETS_RESET_USBCTRL_BITS);
     unreset_block_wait(RESETS_RESET_USBCTRL_BITS);
 
-    /* Limpiar toda la DPRAM — el hardware la comparte para datos y registros */
     memset(usb_dpram, 0, sizeof(*usb_dpram));
 
-    /* Conectar el controlador USB al PHY interno */
     usb_hw->muxing = USB_USB_MUXING_TO_PHY_BITS
                    | USB_USB_MUXING_SOFTCON_BITS;
 
-    /* Habilitar detección de VBUS (necesario para que el controlador funcione) */
     usb_hw->pwr = USB_USB_PWR_VBUS_DETECT_BITS
                 | USB_USB_PWR_VBUS_DETECT_OVERRIDE_EN_BITS;
 
     usb_hw->main_ctrl = USB_MAIN_CTRL_CONTROLLER_EN_BITS;
 
-    /* Generar interrupción en EP0 con buffer único (no doble) */
     usb_hw->sie_ctrl = USB_SIE_CTRL_EP0_INT_1BUF_BITS;
 
-    /* Habilitar las tres interrupciones que nos interesan */
     usb_hw->inte = USB_INTS_BUFF_STATUS_BITS
                  | USB_INTS_BUS_RESET_BITS
                  | USB_INTS_SETUP_REQ_BITS;
@@ -532,8 +507,6 @@ void usb_device_init(void) {
     irq_set_exclusive_handler(USBCTRL_IRQ, isr_usbctrl);
     irq_set_enabled(USBCTRL_IRQ, true);
 
-    /* Activar la resistencia pull-up en D+ para señalizar al host que hay
-     * un dispositivo full-speed conectado */
     usb_hw_set->sie_ctrl = USB_SIE_CTRL_PULLUP_EN_BITS;
 }
 
@@ -557,10 +530,7 @@ uint16_t usb_vendor_read(uint8_t *buf, uint16_t max_len) {
     memcpy(buf, vendor_rx_buf, len);
 
     vendor_rx_ready = false;
-    vendor_rx_len = 0;
-
-    /* No rearmar EP1 OUT aquí — el llamador debe hacerlo con
-     * usb_vendor_arm_rx() después de enviar la respuesta. */
+    vendor_rx_len   = 0;
 
     return len;
 }
@@ -571,11 +541,6 @@ void usb_vendor_arm_rx(void) {
 
 bool usb_vendor_write(const uint8_t *data, uint16_t len) {
     if (vendor_tx_busy) {
-        /*
-         * Fallback de polling: si la ISR no limpió vendor_tx_busy comprobamos
-         * directamente el registro buffer_control de EP2 IN para ver si el
-         * hardware ya terminó la transferencia bulk.
-         */
         struct usb_endpoint_configuration *ep =
             usb_get_endpoint_configuration(EP2_IN_ADDR);
         uint32_t bc = *ep->buffer_control;
@@ -596,7 +561,6 @@ bool usb_vendor_write(const uint8_t *data, uint16_t len) {
 bool usb_vendor_tx_busy(void) {
     if (!vendor_tx_busy) return false;
 
-    /* Consultar el hardware directamente por si la ISR se perdió el evento */
     struct usb_endpoint_configuration *ep =
         usb_get_endpoint_configuration(EP2_IN_ADDR);
     uint32_t bc = *ep->buffer_control;

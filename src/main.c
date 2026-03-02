@@ -17,10 +17,12 @@
 #include "board/board_config.h"
 #include "board/gpio_init.h"
 #include "util/led.h"
+#include "util/adc.h"
 #include "usb/usb_device.h"
 #include "jlink/jlink_handler.h"
 #include "jlink/jlink_protocol.h"
 #include "jlink/jlink_caps.h"
+#include "jtag/jtag_pio.h"
 
 #include "hardware/regs/addressmap.h"
 #define TIMER_TIMELR    (*(volatile uint32_t *)(TIMER_BASE + 0x0Cu))
@@ -98,6 +100,8 @@ static uint8_t tx_data[TX_BUF_SIZE];
 int main(void) {
     gpio_init_all();
     led_init();
+    adc_sense_init();
+    jtag_pio_init();
     usb_device_init();
 
     /* Esperar configuración USB — LED parpadea sin bloquear para que el
@@ -114,7 +118,6 @@ int main(void) {
         bool     blink_state = false;
         while ((time_us() - enum_start) < 15000000u) {
             if (usb_is_configured()) {
-                jlink_handler_reset();  /* nueva sesión — resetear flag de flush */
                 did_enumerate = true;
                 break;
             }
@@ -153,6 +156,18 @@ int main(void) {
     static uint16_t write_cfg_accum  = 0;
     static bool     write_cfg_active = false;
 
+    /*
+     * Estado para acumulación multi-paquete de HW_JTAG3 (0xCF).
+     * Formato: cmd(1) + dummy(1) + numBits(2 LE) + TMS[N] + TDI[N].
+     * Total = 4 + 2*ceil(numBits/8) bytes, variable — puede superar los 64 bytes
+     * de un paquete USB FS. main.c acumula en jtag3_buf hasta tener jtag3_total bytes,
+     * luego despacha el comando completo a jlink_handle_command().
+     */
+    static uint8_t  jtag3_buf[CMD_BUF_SIZE];
+    static uint32_t jtag3_total  = 0;
+    static uint16_t jtag3_accum  = 0;
+    static bool     jtag3_active = false;
+
     /* --------------------------------------------------------------------------
      * Bucle principal de comandos J-Link
      * -------------------------------------------------------------------------- */
@@ -167,7 +182,48 @@ int main(void) {
             cmd_count++;
             if (cmd_count == 1) first_cmd_byte = pkt[0];
 
-            if (write_cfg_active) {
+            if (jtag3_active) {
+                /*
+                 * Paquetes de datos de HW_JTAG3: acumular en jtag3_buf
+                 * hasta completar jtag3_total bytes, luego despachar.
+                 */
+                last_cmd_byte = EMU_CMD_HW_JTAG3;
+
+                uint16_t space = (uint16_t)(jtag3_total - jtag3_accum);
+                if (len < space) space = len;
+                memcpy(jtag3_buf + jtag3_accum, pkt, space);
+                jtag3_accum += space;
+
+                if (jtag3_accum >= (uint16_t)jtag3_total) {
+                    /* Comando completo — despachar */
+                    uint16_t tx_len = 0;
+                    jlink_handle_command(jtag3_buf, (uint16_t)jtag3_total,
+                                        tx_data, &tx_len);
+                    jtag3_active = false;
+                    jtag3_total  = 0;
+                    jtag3_accum  = 0;
+
+                    if (tx_len > 0) {
+                        uint16_t offset = 0;
+                        while (offset < tx_len) {
+                            uint16_t chunk = tx_len - offset;
+                            if (chunk > 64) chunk = 64;
+                            if (usb_vendor_write(&tx_data[offset], chunk))
+                                offset += chunk;
+                            usb_device_task();
+                        }
+                        uint32_t wait_start = time_us();
+                        while ((time_us() - wait_start) < 50000u) {
+                            if (!usb_vendor_tx_busy()) break;
+                            usb_device_task();
+                        }
+                    }
+                    usb_vendor_arm_rx();
+                } else {
+                    usb_vendor_arm_rx();
+                }
+
+            } else if (write_cfg_active) {
                 /*
                  * Paquetes de datos de WRITE_CONFIG: acumular en write_cfg_buf.
                  * No se genera respuesta; simplemente seguimos leyendo.
@@ -189,6 +245,26 @@ int main(void) {
             } else {
                 last_cmd_byte = pkt[0];
                 memcpy(rx_data, pkt, len);
+
+                /*
+                 * HW_JTAG3 puede ocupar múltiples paquetes USB si TMS+TDI
+                 * no caben en los 60 bytes restantes del primer paquete.
+                 * Si el payload completo (4 + 2*N bytes) no ha llegado aún,
+                 * iniciamos la acumulación y esperamos paquetes adicionales.
+                 */
+                if (pkt[0] == EMU_CMD_HW_JTAG3 && len >= 4) {
+                    uint32_t nb       = (uint32_t)pkt[2] | ((uint32_t)pkt[3] << 8);
+                    uint32_t nb_bytes = (nb + 7u) / 8u;
+                    uint32_t total    = 4u + 2u * nb_bytes;
+                    if (total > (uint32_t)len && total <= CMD_BUF_SIZE) {
+                        memcpy(jtag3_buf, pkt, len);
+                        jtag3_accum  = (uint16_t)len;
+                        jtag3_total  = total;
+                        jtag3_active = true;
+                        usb_vendor_arm_rx();
+                        continue; /* esperar paquetes restantes */
+                    }
+                }
 
                 uint16_t tx_len = 0;
                 jlink_handle_command(rx_data, len, tx_data, &tx_len);
@@ -225,18 +301,62 @@ int main(void) {
                         usb_device_task();
                     }
 
-                    /*
-                     * Para el flush de sincronización (0x00): fire-and-forget.
-                     * EP2 IN queda armado con la VERSION; jlink.sys la leerá
-                     * cuando sondee EP2 IN bulk. No bloqueamos aquí porque
-                     * los 1023 paquetes de ceros restantes deben fluir sin pausa.
-                     *
-                     * Para cualquier otro comando: esperar hasta 500 ms a que
-                     * jlink.sys lea la respuesta de EP2 IN.
-                     */
-                    if (pkt[0] != 0x00) {
+                    /* Esperar hasta 50 ms a que jlink.sys lea la respuesta.
+                     * USB FS bulk: el host consume los datos en <1 ms; 50 ms
+                     * es suficiente margen sin bloquear el bucle de comandos. */
+                    {
                         uint32_t wait_start = time_us();
-                        while ((time_us() - wait_start) < 500000u) {
+                        while ((time_us() - wait_start) < 50000u) {
+                            if (!usb_vendor_tx_busy()) break;
+                            usb_device_task();
+                        }
+                    }
+
+                    /*
+                     * EMU_CMD_VERSION requiere una segunda transferencia:
+                     * tras los 2 bytes de longitud, jlink.sys emite un nuevo
+                     * URB de lectura para VERSION_BODY_LEN (112) bytes.
+                     * Enviamos el body inmediatamente, antes de armar RX.
+                     */
+                    if (rx_data[0] == EMU_CMD_VERSION) {
+                        uint16_t body_len = 0;
+                        jlink_cmd_version_body(tx_data, &body_len);
+                        uint16_t off2 = 0;
+                        while (off2 < body_len) {
+                            uint16_t chunk = body_len - off2;
+                            if (chunk > 64) chunk = 64;
+                            if (usb_vendor_write(&tx_data[off2], chunk))
+                                off2 += chunk;
+                            usb_device_task();
+                        }
+                        uint32_t w2 = time_us();
+                        while ((time_us() - w2) < 50000u) {
+                            if (!usb_vendor_tx_busy()) break;
+                            usb_device_task();
+                        }
+                    }
+
+                    /*
+                     * EMU_CMD_IDSEGGER también requiere una segunda transferencia:
+                     * tras los 4 bytes de cabecera [00 09 00 00], jlink.sys emite
+                     * un nuevo URB de lectura para 2304 bytes de volcado de licencias.
+                     * El sub-comando (rx_data[1]) determina qué bloque enviar:
+                     *   0x02 → tabla de módulos (RDI, GDB, JFlash, …)
+                     *   0x00 → bloque de versión/modelo
+                     */
+                    if (rx_data[0] == EMU_CMD_IDSEGGER) {
+                        uint16_t body_len = 0;
+                        jlink_cmd_idsegger_body(rx_data[1], tx_data, &body_len);
+                        uint16_t off3 = 0;
+                        while (off3 < body_len) {
+                            uint16_t chunk = body_len - off3;
+                            if (chunk > 64) chunk = 64;
+                            if (usb_vendor_write(&tx_data[off3], chunk))
+                                off3 += chunk;
+                            usb_device_task();
+                        }
+                        uint32_t w3 = time_us();
+                        while ((time_us() - w3) < 50000u) {
                             if (!usb_vendor_tx_busy()) break;
                             usb_device_task();
                         }

@@ -6,8 +6,7 @@
 #define LED_MASK (1u << PIN_LED)
 
 void led_init(void) {
-    /* GP25 already configured as SIO output by gpio_init_all().
-     * Ensure it starts off. */
+    /* PIN_LED (GP14) ya configurado como SIO output en gpio_init_all(). */
     sio_hw->gpio_clr = LED_MASK;
 }
 

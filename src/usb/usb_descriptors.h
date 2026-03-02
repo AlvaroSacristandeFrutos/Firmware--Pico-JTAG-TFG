@@ -26,23 +26,42 @@ struct usb_endpoint_configuration {
     uint8_t next_pid;
 };
 
-/* ---- Device configuration (from dev_lowlevel.h) ---- */
+/* ---- Device configuration ---- */
 struct usb_device_configuration {
-    const struct usb_device_descriptor        *device_descriptor;
-    const struct usb_interface_descriptor      *interface_descriptor;
-    const struct usb_configuration_descriptor  *config_descriptor;
-    const unsigned char                        *lang_descriptor;
-    const unsigned char                       **descriptor_strings;
+    const struct usb_device_descriptor  *device_descriptor;
+
+    /*
+     * Descriptor de configuración completo, pre-construido como array de bytes.
+     * Incluye el header de configuración, el IAD, las tres interfaces
+     * (CDC Control + CDC Data + J-Link vendor) y todos sus endpoints y
+     * los descriptores funcionales CDC.
+     */
+    const uint8_t   *config_desc_full;
+    uint16_t         config_desc_len;
+
+    const unsigned char  *lang_descriptor;
+    const unsigned char **descriptor_strings;
+
     /* USB_NUM_ENDPOINTS = 16 (from SDK) */
     struct usb_endpoint_configuration endpoints[USB_NUM_ENDPOINTS];
 };
 
 /* ---- Endpoint addresses ---- */
-#define EP0_IN_ADDR   (USB_DIR_IN  | 0)
-#define EP0_OUT_ADDR  (USB_DIR_OUT | 0)
-#define EP1_OUT_ADDR  (USB_DIR_OUT | 1)   /* comandos host → probe (0x01) */
-#define EP1_IN_ADDR   (USB_DIR_IN  | 1)   /* interrupt IN (0x81): jlink.sys lo exige para activar modo comandos */
-#define EP2_IN_ADDR   (USB_DIR_IN  | 2)   /* respuestas bulk probe → host (0x82) — igual que J-Link real */
+#define EP0_IN_ADDR    (USB_DIR_IN  | 0)   /* 0x80 — control IN  */
+#define EP0_OUT_ADDR   (USB_DIR_OUT | 0)   /* 0x00 — control OUT */
+
+/* CDC endpoints (interfaces 0 y 1) */
+#define CDC_EP_NOTIFY  (USB_DIR_IN  | 1)   /* 0x81 — interrupt IN: notificaciones CDC */
+#define CDC_EP_DATA_OUT (USB_DIR_OUT | 1)  /* 0x01 — bulk OUT: datos CDC host→device */
+#define CDC_EP_DATA_IN  (USB_DIR_IN  | 2)  /* 0x82 — bulk IN: datos CDC device→host */
+
+/* J-Link endpoints (interface 2) */
+#define EP3_OUT_ADDR   (USB_DIR_OUT | 3)   /* 0x03 — bulk OUT: comandos J-Link */
+#define EP3_IN_ADDR    (USB_DIR_IN  | 3)   /* 0x83 — bulk IN:  respuestas J-Link */
+
+/* Aliases para no romper referencias antiguas en usb_device.c */
+#define EP1_OUT_ADDR   EP3_OUT_ADDR
+#define EP2_IN_ADDR    EP3_IN_ADDR
 
 /* ---- Extern declarations ---- */
 extern struct usb_device_configuration dev_config;
@@ -64,6 +83,6 @@ extern const uint8_t  ms_os_20_descriptor_set[];
 extern const uint16_t ms_os_20_descriptor_set_len;
 
 /* Vendor request code for MS OS 2.0 descriptor set */
-#define MS_OS_20_VENDOR_CODE  0xBF   /* Código vendor para MS OS 2.0 — debe ser != EMU_CMD_VERSION (0x01) */
+#define MS_OS_20_VENDOR_CODE  0xBF
 
 #endif /* USB_DESCRIPTORS_H */

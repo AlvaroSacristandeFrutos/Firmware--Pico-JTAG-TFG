@@ -37,6 +37,10 @@
 #define EMU_CMD_GET_CPU_CAPS        0xE9
 #define EMU_CMD_EXEC_CPU_CMD        0xEA
 #define EMU_CMD_GET_CAPS_EX         0xED
+#define EMU_CMD_IDSEGGER            0x16   /* handshake de autenticación SEGGER */
+#define EMU_CMD_UNKNOWN_09          0x09   /* telemetría interna no documentada */
+#define EMU_CMD_UNKNOWN_0D          0x0D   /* telemetría interna no documentada */
+#define EMU_CMD_UNKNOWN_0E          0x0E   /* telemetría interna no documentada */
 #define EMU_CMD_GET_HW_VERSION      0xF0
 #define EMU_CMD_WRITE_DCC           0xF1
 #define EMU_CMD_READ_CONFIG         0xF2
@@ -65,21 +69,14 @@
 #define EMU_CAP_SWD                 (1u << 20)
 #define EMU_CAP_GET_CAPS_EX         (1u << 21)
 
-/* Capabilities que este probe anuncia como implementadas */
-#define JLINK_CAPS  (EMU_CAP_RESERVED_1       | \
-                     EMU_CAP_GET_HW_VERSION   | \
-                     EMU_CAP_READ_CONFIG      | \
-                     EMU_CAP_WRITE_CONFIG     | \
-                     EMU_CAP_GET_SPEEDS       | \
-                     EMU_CAP_GET_MAX_BLOCK_SIZE | \
-                     EMU_CAP_GET_HW_INFO      | \
-                     EMU_CAP_SELECT_IF        | \
-                     EMU_CAP_GET_CAPS_EX)
+/* Capabilities que este probe anuncia como implementadas.
+ * Valor 0xB9FF7BBF capturado del clon chino J-Link V9 funcionando con jlink.sys V8.90. */
+#define JLINK_CAPS  0xB9FF7BBFu
 
 /* ---- Versión de hardware ---- */
 /* Formato: MMmmrr00 donde MM=mayor, mm=menor, rr=revisión.
- * V9.0 revisión 0 = 90000. Compatible con los clones más comunes. */
-#define JLINK_HW_VERSION    90000u
+ * V9.70 = 97000. Los clones V9.0 (90000) son bloqueados por jlink.sys moderno. */
+#define JLINK_HW_VERSION    97000u
 
 /* ---- Velocidades de reloj JTAG ---- */
 #define JLINK_BASE_FREQ     48000000u   /* frecuencia base del divisor PIO */
@@ -103,7 +100,10 @@
 /* ---- Tamaños de buffer ---- */
 #define CMD_BUF_COUNT       4
 #define CMD_BUF_SIZE        2048
-#define TX_BUF_SIZE         2049    /* byte extra por si acaso se necesita prefijo de estado */
+#define TX_BUF_SIZE         2400    /* debe ser >= IDSEGGER_BODY_LEN (2304) */
+
+/* Longitud del payload IDSEGGER (dos bloques de autenticación de licencias). */
+#define IDSEGGER_BODY_LEN   2304
 
 /*
  * Estructura de buffer de comando preparada para una arquitectura dual-core

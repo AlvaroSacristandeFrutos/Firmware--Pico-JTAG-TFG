@@ -2,8 +2,12 @@
 
 #include <stdint.h>
 
-/* EMU_CMD_VERSION — return firmware version string. */
+/* EMU_CMD_VERSION — two-phase response matching real J-Link V9 clone.
+ * Phase 1: call jlink_cmd_version   → sends 2 bytes [0x70, 0x00] (length=112).
+ * Phase 2: call jlink_cmd_version_body → sends exactly 112 bytes (string+padding).
+ * Both transfers must be sent as separate USB bulk transactions. */
 void jlink_cmd_version(uint8_t *tx_buf, uint16_t *tx_len);
+void jlink_cmd_version_body(uint8_t *tx_buf, uint16_t *tx_len);
 
 /* EMU_CMD_GET_CAPS — return 32-bit capabilities bitmap. */
 void jlink_cmd_get_caps(uint8_t *tx_buf, uint16_t *tx_len);
@@ -59,3 +63,17 @@ void jlink_cmd_write_config(const uint8_t *rx_buf, uint16_t rx_len,
 
 /* Called from main.c to store accumulated WRITE_CONFIG data (256 bytes). */
 void jlink_config_update(const uint8_t *data, uint16_t len);
+
+/* EMU_CMD_IDSEGGER (0x16) — SEGGER authentication handshake.
+ * Phase 1: jlink_cmd_idsegger()          → 4 bytes header [00 09 00 00].
+ * Phase 2: jlink_cmd_idsegger_body(sub)  → 2304 bytes payload.
+ * subcmd = rx_buf[1] from the original packet (0x02 or 0x00). */
+void jlink_cmd_idsegger(uint8_t *tx_buf, uint16_t *tx_len);
+void jlink_cmd_idsegger_body(uint8_t subcmd, uint8_t *tx_buf, uint16_t *tx_len);
+
+/* Comandos de telemetría interna (caja negra) — respuestas capturadas. */
+void jlink_cmd_unknown_0e(const uint8_t *rx_buf, uint16_t rx_len,
+                          uint8_t *tx_buf, uint16_t *tx_len);
+void jlink_cmd_unknown_0d(uint8_t *tx_buf, uint16_t *tx_len);
+void jlink_cmd_unknown_09(const uint8_t *rx_buf, uint16_t rx_len,
+                          uint8_t *tx_buf, uint16_t *tx_len);

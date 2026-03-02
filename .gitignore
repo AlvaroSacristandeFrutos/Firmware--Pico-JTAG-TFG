@@ -1,79 +1,10 @@
-# ==========================================
-# Entornos y Herramientas (Añadido para ti)
-# ==========================================
-# Dependencias de Node.js
-node_modules/
-npm-debug.log
-
-# Archivos de configuración de Visual Studio
-.vs/
-*.user
-*.suo
-*.db
-
-# ==========================================
-# C/C++ y CMake (Tu configuración original)
-# ==========================================
-# Directorio de build generado por CMake/ninja
+# Salida de compilación
 build/
 out/
 
-# Archivos generados por CMake en la raíz (por si acaso)
-CMakeCache.txt
-CMakeFiles/
+# IDEs
+.vs/
+.vscode/
 
-# Prerequisites
-*.d
-
-# Object files
-*.o
-*.ko
-*.obj
-*.elf
-
-# Linker output
-*.ilk
-*.map
-*.exp
-
-# Precompiled Headers
-*.gch
-*.pch
-
-# Libraries
-*.lib
-*.a
-*.la
-*.lo
-
-# Shared objects (inc. Windows DLLs)
-*.dll
-*.so
-*.so.*
-*.dylib
-
-# Executables
-*.exe
-*.out
-*.app
-*.i*86
-*.x86_64
-*.hex
-
-# Debug files
-*.dSYM/
-*.su
-*.idb
-*.pdb
-
-# Kernel Module Compile Results
-*.mod*
-*.cmd
-.tmp_versions/
-modules.order
-Module.symvers
-Mkfile.old
-dkms.conf
-
-# debug information files
-*.dwo
+# Node.js
+node_modules/

@@ -1,7 +1,6 @@
 #include "jlink_handler.h"
 #include "jlink_protocol.h"
 #include "jlink_caps.h"
-#include <stdbool.h>
 
 /*
  * Despachador de comandos J-Link.
@@ -9,17 +8,6 @@
  * y llama a la función de respuesta correspondiente en jlink_caps.c.
  * Los comandos desconocidos se responden con un payload vacío.
  */
-
-/*
- * Flag de sesión: asegura que la respuesta VERSION al flush 0x00 solo
- * se envía una vez por sesión USB (el flush dura 1024 paquetes de 64 B).
- * Se resetea con jlink_handler_reset() cuando el host reconfigura el USB.
- */
-static bool s_flush_version_sent = false;
-
-void jlink_handler_reset(void) {
-    s_flush_version_sent = false;
-}
 
 void jlink_handle_command(const uint8_t *rx_buf, uint16_t rx_len,
                           uint8_t *tx_buf, uint16_t *tx_len) {
@@ -31,23 +19,6 @@ void jlink_handle_command(const uint8_t *rx_buf, uint16_t rx_len,
     uint8_t cmd = rx_buf[0];
 
     switch (cmd) {
-    case 0x00:
-        /*
-         * jlink.sys V8.90 abre la sesión enviando 65536 bytes de ceros
-         * (1024 paquetes USB de 64 B) mientras tiene una petición de lectura
-         * pendiente en EP2 IN (0x82).  Solo respondemos al PRIMER paquete
-         * con la cadena de versión; los 1023 restantes se descartan sin TX.
-         * main.c omite el bloqueo de 500 ms para este primer envío, de modo
-         * que EP1 OUT se rearma inmediatamente y el burst de ceros fluye sin
-         * esperar confirmación del host (evita el error E1 del historial).
-         */
-        if (!s_flush_version_sent) {
-            jlink_cmd_version(tx_buf, tx_len);
-            s_flush_version_sent = true;
-        } else {
-            *tx_len = 0;
-        }
-        break;
     case EMU_CMD_VERSION:
         jlink_cmd_version(tx_buf, tx_len);
         break;
@@ -94,6 +65,18 @@ void jlink_handle_command(const uint8_t *rx_buf, uint16_t rx_len,
         break;
     case EMU_CMD_WRITE_CONFIG:
         jlink_cmd_write_config(rx_buf, rx_len, tx_buf, tx_len);
+        break;
+    case EMU_CMD_IDSEGGER:
+        jlink_cmd_idsegger(tx_buf, tx_len);
+        break;
+    case EMU_CMD_UNKNOWN_0E:
+        jlink_cmd_unknown_0e(rx_buf, rx_len, tx_buf, tx_len);
+        break;
+    case EMU_CMD_UNKNOWN_0D:
+        jlink_cmd_unknown_0d(tx_buf, tx_len);
+        break;
+    case EMU_CMD_UNKNOWN_09:
+        jlink_cmd_unknown_09(rx_buf, rx_len, tx_buf, tx_len);
         break;
     default:
         /* Comando no implementado — responder con payload vacío */
