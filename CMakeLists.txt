@@ -17,9 +17,8 @@ add_executable(jlink_pico_probe
     src/usb/usb_descriptors.c
     src/jtag/jtag_pio.c
     src/jtag/jtag_tap.c
-    src/jlink/jlink_handler.c
-    src/jlink/jlink_caps.c
     src/cdc/cdc_uart.c
+    src/cdc/pico_protocol.c
     src/util/led.c
     src/util/adc.c
 )
@@ -47,7 +46,6 @@ target_link_libraries(jlink_pico_probe
     hardware_structs
     hardware_irq
     hardware_resets
-    pico_multicore
     pico_unique_id
 )
 

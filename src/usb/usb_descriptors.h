@@ -32,9 +32,7 @@ struct usb_device_configuration {
 
     /*
      * Descriptor de configuración completo, pre-construido como array de bytes.
-     * Incluye el header de configuración, el IAD, las tres interfaces
-     * (CDC Control + CDC Data + J-Link vendor) y todos sus endpoints y
-     * los descriptores funcionales CDC.
+     * Incluye IAD + CDC (interfaces 0+1) + J-Link vendor (interface 2).
      */
     const uint8_t   *config_desc_full;
     uint16_t         config_desc_len;
@@ -47,21 +45,34 @@ struct usb_device_configuration {
 };
 
 /* ---- Endpoint addresses ---- */
-#define EP0_IN_ADDR    (USB_DIR_IN  | 0)   /* 0x80 — control IN  */
-#define EP0_OUT_ADDR   (USB_DIR_OUT | 0)   /* 0x00 — control OUT */
+#define EP0_IN_ADDR       (USB_DIR_IN  | 0)   /* 0x80 — control IN  */
+#define EP0_OUT_ADDR      (USB_DIR_OUT | 0)   /* 0x00 — control OUT */
 
-/* CDC endpoints (interfaces 0 y 1) */
-#define CDC_EP_NOTIFY  (USB_DIR_IN  | 1)   /* 0x81 — interrupt IN: notificaciones CDC */
-#define CDC_EP_DATA_OUT (USB_DIR_OUT | 1)  /* 0x01 — bulk OUT: datos CDC host→device */
-#define CDC_EP_DATA_IN  (USB_DIR_IN  | 2)  /* 0x82 — bulk IN: datos CDC device→host */
+/*
+ * CDC endpoints (interfaces 0 y 1):
+ *   EP1 IN  (0x81) interrupt — notificaciones CDC (nunca armado)
+ *   EP3 OUT (0x03) bulk     — datos CDC host→device (absorber y descartar)
+ *   EP3 IN  (0x83) bulk     — datos CDC device→host (nunca armado)
+ *
+ * CDC usa EP3 para datos (no EP1/EP2) para dejar EP2 libre para J-Link.
+ * La presencia de CDC hace que jlink.sys identifique el device como
+ * J-Link V9 y use el protocolo estándar (host-initiated).
+ */
+#define CDC_EP_NOTIFY     (USB_DIR_IN  | 1)   /* 0x81 — interrupt IN: notify CDC */
+#define CDC_EP_DATA_OUT   (USB_DIR_OUT | 3)   /* 0x03 — bulk OUT: datos CDC      */
+#define CDC_EP_DATA_IN    (USB_DIR_IN  | 3)   /* 0x83 — bulk IN:  datos CDC      */
 
-/* J-Link endpoints (interface 2) */
-#define EP3_OUT_ADDR   (USB_DIR_OUT | 3)   /* 0x03 — bulk OUT: comandos J-Link */
-#define EP3_IN_ADDR    (USB_DIR_IN  | 3)   /* 0x83 — bulk IN:  respuestas J-Link */
+/*
+ * J-Link endpoints (interface 2, class 0xFF/0xFF/0xFF):
+ *   EP2 OUT (0x02) bulk — comandos J-Link (host → device)
+ *   EP2 IN  (0x82) bulk — respuestas J-Link (device → host)
+ */
+#define JLINK_EP_CMD_OUT  (USB_DIR_OUT | 2)   /* 0x02 — bulk OUT comandos  */
+#define JLINK_EP_RSP_IN   (USB_DIR_IN  | 2)   /* 0x82 — bulk IN respuestas */
 
-/* Aliases para no romper referencias antiguas en usb_device.c */
-#define EP1_OUT_ADDR   EP3_OUT_ADDR
-#define EP2_IN_ADDR    EP3_IN_ADDR
+/* Aliases usados en usb_device.c */
+#define EP1_OUT_ADDR  JLINK_EP_CMD_OUT   /* 0x02 — J-Link comandos */
+#define EP2_IN_ADDR   JLINK_EP_RSP_IN    /* 0x82 — J-Link respuestas */
 
 /* ---- Extern declarations ---- */
 extern struct usb_device_configuration dev_config;
@@ -73,16 +84,5 @@ void usb_descriptors_init(void);
 /* Convert a C string to a USB string descriptor in the provided buffer.
  * Returns the descriptor length. */
 uint8_t usb_prepare_string_descriptor(const unsigned char *str, uint8_t *buf);
-
-/* BOS descriptor (includes MS OS 2.0 Platform Capability) */
-extern const uint8_t  bos_descriptor[];
-extern const uint16_t bos_descriptor_len;
-
-/* MS OS 2.0 Descriptor Set (returned via vendor request) */
-extern const uint8_t  ms_os_20_descriptor_set[];
-extern const uint16_t ms_os_20_descriptor_set_len;
-
-/* Vendor request code for MS OS 2.0 descriptor set */
-#define MS_OS_20_VENDOR_CODE  0xBF
 
 #endif /* USB_DESCRIPTORS_H */

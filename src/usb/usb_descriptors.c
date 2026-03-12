@@ -1,7 +1,14 @@
 /*
- * Descriptores USB para J-Link Pico Probe.
+ * Descriptores USB para Pico Boundary Scan Adapter.
  * Adaptado de pico-examples/usb/device/dev_lowlevel/dev_lowlevel.h
  * (Copyright (c) 2020 Raspberry Pi (Trading) Ltd, licencia BSD-3-Clause)
+ *
+ * VID/PID: 0x2E8A / 0x000A  (Raspberry Pi Pico, CDC composite)
+ * 2 interfaces: CDC ACM Control (MI_00) + CDC Data (MI_01)
+ * Endpoints:
+ *   EP1 IN  (0x81) interrupt — notificaciones CDC (nunca armado)
+ *   EP3 OUT (0x03) bulk     — datos CDC host→device (protocolo PicoAdapter)
+ *   EP3 IN  (0x83) bulk     — datos CDC device→host (respuestas PicoAdapter)
  */
 
 #include "usb_descriptors.h"
@@ -13,11 +20,9 @@
  */
 void ep0_in_handler(uint8_t *buf, uint16_t len);
 void ep0_out_handler(uint8_t *buf, uint16_t len);
-void ep1_out_handler(uint8_t *buf, uint16_t len);   /* J-Link: EP3 OUT (0x03) */
-void ep2_in_handler(uint8_t *buf, uint16_t len);    /* J-Link: EP3 IN (0x83)  */
-void cdc_notify_in_handler(uint8_t *buf, uint16_t len);  /* CDC EP1 IN  (0x81) */
-void cdc_data_out_handler(uint8_t *buf, uint16_t len);   /* CDC EP1 OUT (0x01) */
-void cdc_data_in_handler(uint8_t *buf, uint16_t len);    /* CDC EP2 IN  (0x82) */
+void cdc_notify_in_handler(uint8_t *buf, uint16_t len);  /* CDC EP1 IN  (0x81) notify         */
+void cdc_data_out_handler(uint8_t *buf, uint16_t len);   /* CDC EP3 OUT (0x03) datos entrantes */
+void cdc_data_in_handler(uint8_t *buf, uint16_t len);    /* CDC EP3 IN  (0x83) datos salientes */
 
 /* ---------------------------------------------------------------------- */
 /*  Descriptores de endpoint                                               */
@@ -41,51 +46,31 @@ static const struct usb_endpoint_descriptor ep0_in = {
     .bInterval        = 0
 };
 
-/* CDC EP1 IN interrupt (notificaciones CDC, 0x81) */
+/* CDC EP1 IN interrupt — notificaciones CDC (0x81, nunca armado) */
 static const struct usb_endpoint_descriptor cdc_ep_notify = {
     .bLength          = sizeof(struct usb_endpoint_descriptor),
     .bDescriptorType  = USB_DT_ENDPOINT,
     .bEndpointAddress = CDC_EP_NOTIFY,   /* 0x81 */
     .bmAttributes     = USB_TRANSFER_TYPE_INTERRUPT,
     .wMaxPacketSize   = 16,
-    .bInterval        = 255              /* 255 ms */
+    .bInterval        = 255
 };
 
-/* CDC EP1 OUT bulk (datos host→device, 0x01) */
+/* CDC EP3 OUT bulk — datos host→device (0x03, protocolo PicoAdapter) */
 static const struct usb_endpoint_descriptor cdc_ep_data_out = {
     .bLength          = sizeof(struct usb_endpoint_descriptor),
     .bDescriptorType  = USB_DT_ENDPOINT,
-    .bEndpointAddress = CDC_EP_DATA_OUT, /* 0x01 */
+    .bEndpointAddress = CDC_EP_DATA_OUT, /* 0x03 */
     .bmAttributes     = USB_TRANSFER_TYPE_BULK,
     .wMaxPacketSize   = 64,
     .bInterval        = 0
 };
 
-/* CDC EP2 IN bulk (datos device→host, 0x82) */
+/* CDC EP3 IN bulk — datos device→host (0x83, respuestas PicoAdapter) */
 static const struct usb_endpoint_descriptor cdc_ep_data_in = {
     .bLength          = sizeof(struct usb_endpoint_descriptor),
     .bDescriptorType  = USB_DT_ENDPOINT,
-    .bEndpointAddress = CDC_EP_DATA_IN,  /* 0x82 */
-    .bmAttributes     = USB_TRANSFER_TYPE_BULK,
-    .wMaxPacketSize   = 64,
-    .bInterval        = 0
-};
-
-/* EP3 OUT bulk (comandos J-Link, 0x03) */
-static const struct usb_endpoint_descriptor ep3_out = {
-    .bLength          = sizeof(struct usb_endpoint_descriptor),
-    .bDescriptorType  = USB_DT_ENDPOINT,
-    .bEndpointAddress = EP3_OUT_ADDR,
-    .bmAttributes     = USB_TRANSFER_TYPE_BULK,
-    .wMaxPacketSize   = 64,
-    .bInterval        = 0
-};
-
-/* EP3 IN bulk (respuestas J-Link, 0x83) */
-static const struct usb_endpoint_descriptor ep3_in = {
-    .bLength          = sizeof(struct usb_endpoint_descriptor),
-    .bDescriptorType  = USB_DT_ENDPOINT,
-    .bEndpointAddress = EP3_IN_ADDR,
+    .bEndpointAddress = CDC_EP_DATA_IN,  /* 0x83 */
     .bmAttributes     = USB_TRANSFER_TYPE_BULK,
     .wMaxPacketSize   = 64,
     .bInterval        = 0
@@ -101,15 +86,14 @@ static const struct usb_device_descriptor device_descriptor = {
     .bcdUSB             = 0x0200,
     /*
      * Clase 0xEF/0x02/0x01 (Misc/IAD): necesaria cuando el descriptor de
-     * configuración contiene un IAD (Interface Association Descriptor).
-     * Sin esta clase, Windows no aplica el IAD correctamente.
+     * configuración contiene un IAD.
      */
     .bDeviceClass       = 0xEF,
     .bDeviceSubClass    = 0x02,
     .bDeviceProtocol    = 0x01,
     .bMaxPacketSize0    = 64,
-    .idVendor           = 0x1366,   /* Segger Microteq */
-    .idProduct          = 0x0105,   /* J-Link OB */
+    .idVendor           = 0x2E8A,   /* Raspberry Pi */
+    .idProduct          = 0x000A,   /* Pico CDC composite */
     .bcdDevice          = 0x0100,
     .iManufacturer      = 1,
     .iProduct           = 2,
@@ -118,30 +102,27 @@ static const struct usb_device_descriptor device_descriptor = {
 };
 
 /* ---------------------------------------------------------------------- */
-/*  Descriptor de configuración completo (98 bytes, pre-construido)       */
+/*  Descriptor de configuración completo (75 bytes, pre-construido)       */
 /*                                                                         */
 /*  Estructura:                                                            */
 /*    [  9] Config header                                                  */
-/*    [  8] IAD (Interface Association Descriptor) para CDC               */
+/*    [  8] IAD (interfaces 0+1 como función CDC)                         */
 /*    [  9] Interface 0: CDC ACM Control (class 0x02/0x02/0x01)           */
 /*    [  5] CDC Header Functional Descriptor                               */
 /*    [  4] CDC ACM Functional Descriptor                                  */
 /*    [  5] CDC Union Functional Descriptor                                */
 /*    [  5] CDC Call Management Functional Descriptor                      */
-/*    [  7] EP1 IN interrupt (CDC notificaciones, 0x81)                   */
+/*    [  7] EP1 IN interrupt (CDC notify, 0x81, nunca armado)             */
 /*    [  9] Interface 1: CDC Data (class 0x0A/0x00/0x00)                 */
-/*    [  7] EP1 OUT bulk (CDC datos, 0x01)                                */
-/*    [  7] EP2 IN  bulk (CDC datos, 0x82)                                */
-/*    [  9] Interface 2: J-Link Vendor (class 0xFF/0xFF/0xFF)             */
-/*    [  7] EP3 OUT bulk (J-Link comandos, 0x03)                          */
-/*    [  7] EP3 IN  bulk (J-Link respuestas, 0x83)                        */
-/*  TOTAL = 98 bytes = 0x62                                               */
+/*    [  7] EP3 OUT bulk (datos host→device, 0x03)                       */
+/*    [  7] EP3 IN  bulk (datos device→host, 0x83)                       */
+/*  TOTAL = 75 bytes = 0x4B                                               */
 /* ---------------------------------------------------------------------- */
 static const uint8_t s_config_desc[] = {
     /* --- Cabecera de configuración (9 bytes) --- */
     0x09, 0x02,         /* bLength=9, bDescriptorType=CONFIGURATION */
-    0x62, 0x00,         /* wTotalLength=98 (LE) */
-    0x03,               /* bNumInterfaces=3 */
+    0x4B, 0x00,         /* wTotalLength=75 (LE) */
+    0x02,               /* bNumInterfaces=2 */
     0x01,               /* bConfigurationValue=1 */
     0x00,               /* iConfiguration=0 */
     0xC0,               /* bmAttributes: self-powered */
@@ -160,7 +141,7 @@ static const uint8_t s_config_desc[] = {
     0x09, 0x04,         /* bLength=9, bDescriptorType=INTERFACE */
     0x00,               /* bInterfaceNumber=0 */
     0x00,               /* bAlternateSetting=0 */
-    0x01,               /* bNumEndpoints=1 (solo EP1 IN interrupt) */
+    0x01,               /* bNumEndpoints=1 */
     0x02,               /* bInterfaceClass=CDC */
     0x02,               /* bInterfaceSubClass=ACM */
     0x01,               /* bInterfaceProtocol=AT commands */
@@ -172,7 +153,7 @@ static const uint8_t s_config_desc[] = {
 
     /* CDC ACM Functional Descriptor (4 bytes) */
     0x04, 0x24, 0x02,   /* bFunctionLength=4, CS_INTERFACE, ABSTRACT_CONTROL_MANAGEMENT */
-    0x00,               /* bmCapabilities: ninguna requerida */
+    0x00,               /* bmCapabilities=0 */
 
     /* CDC Union Functional Descriptor (5 bytes) */
     0x05, 0x24, 0x06,   /* bFunctionLength=5, CS_INTERFACE, UNION */
@@ -181,10 +162,10 @@ static const uint8_t s_config_desc[] = {
 
     /* CDC Call Management Functional Descriptor (5 bytes) */
     0x05, 0x24, 0x01,   /* bFunctionLength=5, CS_INTERFACE, CALL_MANAGEMENT */
-    0x00,               /* bmCapabilities: no call management */
+    0x00,               /* bmCapabilities=0 */
     0x01,               /* bDataInterface=1 */
 
-    /* EP1 IN interrupt — notificaciones CDC (7 bytes) */
+    /* EP1 IN interrupt — notify CDC (7 bytes) */
     0x07, 0x05,         /* bLength=7, bDescriptorType=ENDPOINT */
     0x81,               /* bEndpointAddress=EP1 IN */
     0x03,               /* bmAttributes=interrupt */
@@ -201,38 +182,14 @@ static const uint8_t s_config_desc[] = {
     0x00,               /* bInterfaceProtocol=0 */
     0x00,               /* iInterface=0 */
 
-    /* EP1 OUT bulk — datos CDC (7 bytes) */
-    0x07, 0x05,         /* bLength=7, bDescriptorType=ENDPOINT */
-    0x01,               /* bEndpointAddress=EP1 OUT */
-    0x02,               /* bmAttributes=bulk */
-    0x40, 0x00,         /* wMaxPacketSize=64 */
-    0x00,               /* bInterval=0 */
-
-    /* EP2 IN bulk — datos CDC (7 bytes) */
-    0x07, 0x05,         /* bLength=7, bDescriptorType=ENDPOINT */
-    0x82,               /* bEndpointAddress=EP2 IN */
-    0x02,               /* bmAttributes=bulk */
-    0x40, 0x00,         /* wMaxPacketSize=64 */
-    0x00,               /* bInterval=0 */
-
-    /* --- Interface 2: J-Link Vendor (9 bytes) --- */
-    0x09, 0x04,         /* bLength=9, bDescriptorType=INTERFACE */
-    0x02,               /* bInterfaceNumber=2 */
-    0x00,               /* bAlternateSetting=0 */
-    0x02,               /* bNumEndpoints=2 */
-    0xFF,               /* bInterfaceClass=Vendor */
-    0xFF,               /* bInterfaceSubClass=Vendor */
-    0xFF,               /* bInterfaceProtocol=Vendor */
-    0x00,               /* iInterface=0 */
-
-    /* EP3 OUT bulk — comandos J-Link (7 bytes) */
+    /* EP3 OUT bulk — datos host→device (7 bytes) */
     0x07, 0x05,         /* bLength=7, bDescriptorType=ENDPOINT */
     0x03,               /* bEndpointAddress=EP3 OUT */
     0x02,               /* bmAttributes=bulk */
     0x40, 0x00,         /* wMaxPacketSize=64 */
     0x00,               /* bInterval=0 */
 
-    /* EP3 IN bulk — respuestas J-Link (7 bytes) */
+    /* EP3 IN bulk — datos device→host (7 bytes) */
     0x07, 0x05,         /* bLength=7, bDescriptorType=ENDPOINT */
     0x83,               /* bEndpointAddress=EP3 IN */
     0x02,               /* bmAttributes=bulk */
@@ -251,39 +208,10 @@ static const unsigned char lang_descriptor[] = {
 static char serial_string[12];
 
 static const unsigned char *descriptor_strings[] = {
-    (const unsigned char *)"SEGGER",
-    (const unsigned char *)"J-Link",
+    (const unsigned char *)"Raspberry Pi",
+    (const unsigned char *)"Pico",
     (const unsigned char *)serial_string
 };
-
-/* ---------------------------------------------------------------------- */
-/*  BOS + MS OS 2.0                                                       */
-/* ---------------------------------------------------------------------- */
-
-#define MS_OS_20_DESC_SET_LEN 30
-
-const uint8_t bos_descriptor[] = {
-    0x05, USB_DT_BOS, 0x21, 0x00, 0x01,
-    0x1C, 0x10, 0x05, 0x00,
-    0xDF, 0x60, 0xDD, 0xD8,
-    0x89, 0x45, 0xC7, 0x4C,
-    0x9C, 0xD2,
-    0x65, 0x9D, 0x9E, 0x64, 0x8A, 0x9F,
-    0x00, 0x00, 0x03, 0x06,
-    MS_OS_20_DESC_SET_LEN, 0x00,
-    MS_OS_20_VENDOR_CODE,
-    0x00
-};
-const uint16_t bos_descriptor_len = sizeof(bos_descriptor);
-
-const uint8_t ms_os_20_descriptor_set[] = {
-    0x0A, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x06,
-    MS_OS_20_DESC_SET_LEN, 0x00,
-    0x14, 0x00, 0x03, 0x00,
-    'W', 'I', 'N', 'U', 'S', 'B', 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
-};
-const uint16_t ms_os_20_descriptor_set_len = sizeof(ms_os_20_descriptor_set);
 
 /* ---------------------------------------------------------------------- */
 /*  Instancia de configuración del dispositivo                             */
@@ -310,40 +238,26 @@ struct usb_device_configuration dev_config = {
             .buffer_control   = &usb_dpram->ep_buf_ctrl[0].in,
             .data_buffer      = &usb_dpram->ep0_buf_a[0],
         },
-        {   /* EP3 OUT (0x03) — comandos J-Link */
-            .descriptor       = &ep3_out,
-            .handler          = &ep1_out_handler,
-            .endpoint_control = &usb_dpram->ep_ctrl[2].out,
-            .buffer_control   = &usb_dpram->ep_buf_ctrl[3].out,
-            .data_buffer      = &usb_dpram->epx_data[0 * 64],
-        },
-        {   /* EP1 IN (0x81) — CDC notificaciones (interrupt, never armed) */
+        {   /* EP1 IN (0x81) — CDC notify (nunca armado) */
             .descriptor       = &cdc_ep_notify,
             .handler          = &cdc_notify_in_handler,
             .endpoint_control = &usb_dpram->ep_ctrl[0].in,
             .buffer_control   = &usb_dpram->ep_buf_ctrl[1].in,
+            .data_buffer      = &usb_dpram->epx_data[0 * 64],
+        },
+        {   /* EP3 OUT (0x03) — datos CDC host→device */
+            .descriptor       = &cdc_ep_data_out,
+            .handler          = &cdc_data_out_handler,
+            .endpoint_control = &usb_dpram->ep_ctrl[2].out,
+            .buffer_control   = &usb_dpram->ep_buf_ctrl[3].out,
             .data_buffer      = &usb_dpram->epx_data[1 * 64],
         },
-        {   /* EP3 IN (0x83) — respuestas J-Link */
-            .descriptor       = &ep3_in,
-            .handler          = &ep2_in_handler,
+        {   /* EP3 IN (0x83) — datos CDC device→host */
+            .descriptor       = &cdc_ep_data_in,
+            .handler          = &cdc_data_in_handler,
             .endpoint_control = &usb_dpram->ep_ctrl[2].in,
             .buffer_control   = &usb_dpram->ep_buf_ctrl[3].in,
             .data_buffer      = &usb_dpram->epx_data[2 * 64],
-        },
-        {   /* EP1 OUT (0x01) — CDC datos host→device (absorber y descartar) */
-            .descriptor       = &cdc_ep_data_out,
-            .handler          = &cdc_data_out_handler,
-            .endpoint_control = &usb_dpram->ep_ctrl[0].out,
-            .buffer_control   = &usb_dpram->ep_buf_ctrl[1].out,
-            .data_buffer      = &usb_dpram->epx_data[3 * 64],
-        },
-        {   /* EP2 IN (0x82) — CDC datos device→host (nunca armado) */
-            .descriptor       = &cdc_ep_data_in,
-            .handler          = &cdc_data_in_handler,
-            .endpoint_control = &usb_dpram->ep_ctrl[1].in,
-            .buffer_control   = &usb_dpram->ep_buf_ctrl[2].in,
-            .data_buffer      = &usb_dpram->epx_data[4 * 64],
         },
     }
 };
@@ -373,14 +287,18 @@ void usb_descriptors_init(void) {
 }
 
 uint8_t usb_prepare_string_descriptor(const unsigned char *str, uint8_t *buf) {
-    uint8_t bLength = (uint8_t)(2 + strlen((const char *)str) * 2);
+    /* El llamador proporciona un buffer de 64 bytes.
+     * Con 2 bytes de cabecera (bLength + bDescriptorType) quedan 62 bytes
+     * para el string en UTF-16 LE → máximo 31 caracteres útiles. */
+    size_t slen = strlen((const char *)str);
+    if (slen > 31u) slen = 31u;
+
+    uint8_t bLength = (uint8_t)(2u + slen * 2u);
     *buf++ = bLength;
     *buf++ = USB_DT_STRING;
-    uint8_t c;
-    do {
-        c = *str++;
-        *buf++ = c;
-        *buf++ = 0;
-    } while (c != '\0');
+    for (size_t i = 0u; i < slen; i++) {
+        *buf++ = str[i];
+        *buf++ = 0u;   /* byte alto UTF-16 LE (ASCII → siempre 0) */
+    }
     return bLength;
 }

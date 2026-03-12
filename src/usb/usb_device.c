@@ -16,6 +16,7 @@
 #include "usb_device.h"
 #include "usb_common.h"
 #include "usb_descriptors.h"
+#include "cdc_uart.h"
 
 #include <string.h>
 #include "hardware/regs/usb.h"
@@ -52,6 +53,9 @@ static volatile bool     vendor_rx_ready = false;
 static volatile uint16_t vendor_rx_len   = 0;
 static uint8_t           vendor_rx_buf[64];
 static volatile bool     vendor_tx_busy  = false;
+
+/* Estado del endpoint CDC Data IN (EP3 IN, 0x83) */
+static volatile bool s_cdc_tx_busy = false;
 
 /* ---------------------------------------------------------------------- */
 /*  Funciones auxiliares                                                   */
@@ -228,11 +232,9 @@ static void usb_set_device_configuration(volatile struct usb_setup_packet *pkt) 
     usb_reset_endpoint_pids();
     vendor_rx_ready = false;
     vendor_tx_busy  = false;
+    s_cdc_tx_busy   = false;
 
-    /* Armar EP3 OUT (J-Link): el host puede enviar el primer comando */
-    usb_start_transfer(usb_get_endpoint_configuration(EP1_OUT_ADDR), NULL, 64);
-
-    /* Armar EP1 OUT (CDC data): listo para absorber datos del host */
+    /* Armar EP3 OUT (CDC data): el host puede enviar comandos del protocolo */
     usb_start_transfer(usb_get_endpoint_configuration(CDC_EP_DATA_OUT), NULL, 64);
 }
 
@@ -247,7 +249,7 @@ static void usb_handle_clear_feature(volatile struct usb_setup_packet *pkt) {
             ep->next_pid = 0;
             if (!(ep_addr & USB_DIR_IN)) {
                 if (ep_addr == EP1_OUT_ADDR) {
-                    /* J-Link OUT */
+                    /* J-Link OUT (EP2 OUT, 0x02) */
                     vendor_rx_ready = false;
                     usb_start_transfer(ep, NULL, 64);
                 } else if (ep_addr == CDC_EP_DATA_OUT) {
@@ -271,17 +273,6 @@ static void usb_handle_setup_packet(void) {
     uint8_t req = pkt->bRequest;
 
     usb_get_endpoint_configuration(EP0_IN_ADDR)->next_pid = 1u;
-
-    /* Petición de vendor para el descriptor MS OS 2.0 */
-    if ((req_direction & USB_DIR_IN) &&
-        (req_direction & USB_REQ_TYPE_TYPE_MASK) == USB_REQ_TYPE_TYPE_VENDOR &&
-        req == MS_OS_20_VENDOR_CODE &&
-        pkt->wIndex == 0x07) {
-        usb_ep0_in_begin(ms_os_20_descriptor_set,
-                         ms_os_20_descriptor_set_len,
-                         pkt->wLength);
-        return;
-    }
 
     if (!(req_direction & USB_DIR_IN)) {
         if (req == USB_REQUEST_SET_ADDRESS) {
@@ -307,9 +298,6 @@ static void usb_handle_setup_packet(void) {
                 break;
             case USB_DT_STRING:
                 usb_handle_string_descriptor(pkt);
-                break;
-            case USB_DT_BOS:
-                usb_ep0_in_begin(bos_descriptor, bos_descriptor_len, pkt->wLength);
                 break;
             default:
                 usb_stall_ep0_in();
@@ -374,6 +362,19 @@ static void usb_bus_reset(void) {
     ep0_pending_sent  = 0;
     vendor_rx_ready   = false;
     vendor_tx_busy    = false;
+    s_cdc_tx_busy     = false;
+
+    /*
+     * Limpiar explícitamente el buffer_control de EP3 IN (J-Link TX).
+     * Si el bus reset llega mientras hay una transferencia en progreso
+     * (AVAIL=1), el registro queda con datos obsoletos en el DPRAM.
+     * La próxima vez que jlink.sys enumera y lee EP3 IN, recibiría
+     * ese byte fantasma antes de enviar ningún comando, desincronizando
+     * el protocolo. Escribir 0 elimina tanto AVAIL como FULL.
+     */
+    struct usb_endpoint_configuration *ep_jlink_in =
+        usb_get_endpoint_configuration(EP2_IN_ADDR);
+    if (ep_jlink_in) *ep_jlink_in->buffer_control = 0;
 
     for (int i = 0; i < USB_NUM_ENDPOINTS; i++) {
         if (dev_config.endpoints[i].descriptor)
@@ -429,29 +430,61 @@ void ep1_out_handler(uint8_t *buf, uint16_t len) {
     vendor_rx_ready = true;
 }
 
-/* EP3 IN (0x83): la respuesta J-Link se ha enviado al host */
+/* EP2 IN (0x82): la respuesta J-Link se ha enviado al host */
 void ep2_in_handler(uint8_t *buf, uint16_t len) {
     (void)buf; (void)len;
     vendor_tx_busy = false;
 }
 
-/* EP1 IN (0x81): CDC notificaciones — nunca se arma, handler por completitud */
+/* EP1 IN (0x81): CDC notify — nunca se arma, handler por completitud */
 void cdc_notify_in_handler(uint8_t *buf, uint16_t len) {
     (void)buf; (void)len;
 }
 
-/* EP1 OUT (0x01): datos CDC del host — absorber y re-armar */
+/* EP3 OUT (0x03): datos CDC del host — almacenar en buffer y re-armar */
 void cdc_data_out_handler(uint8_t *buf, uint16_t len) {
-    (void)buf; (void)len;
-    /* Descartar los datos y re-armar para que el host no se bloquee */
+    cdc_rx_push(buf, len);
     struct usb_endpoint_configuration *ep =
         usb_get_endpoint_configuration(CDC_EP_DATA_OUT);
     if (ep) usb_start_transfer(ep, NULL, 64);
 }
 
-/* EP2 IN (0x82): datos CDC al host — nunca se arma, handler por completitud */
+/* EP3 IN (0x83): TX CDC completado — marcar como libre */
 void cdc_data_in_handler(uint8_t *buf, uint16_t len) {
     (void)buf; (void)len;
+    s_cdc_tx_busy = false;
+}
+
+/* Envía datos al host por EP3 IN en chunks de 64 bytes.
+ * Bloquea (spin) hasta que cada chunk sea aceptado por el hardware.
+ * Las interrupciones USB siguen activas, por lo que s_cdc_tx_busy
+ * será borrado por cdc_data_in_handler desde la ISR. */
+void cdc_send(const uint8_t *data, uint16_t len) {
+    uint16_t off = 0;
+    struct usb_endpoint_configuration *ep =
+        usb_get_endpoint_configuration(CDC_EP_DATA_IN);
+    if (!ep) return;
+
+    while (off < len) {
+        /* Esperar a que la transferencia anterior haya completado.
+         * Timeout de 50 ms: si el host se desconecta o el bus se resetea
+         * mientras esperamos, s_cdc_tx_busy nunca se borra desde la ISR y
+         * sin timeout el firmware se congela indefinidamente. */
+        uint32_t deadline = time_us_32() + 50000u;
+        while (s_cdc_tx_busy) {
+            if ((int32_t)(time_us_32() - deadline) >= 0) {
+                s_cdc_tx_busy = false;   /* liberar flag y abortar envío */
+                return;
+            }
+        }
+
+        uint16_t chunk = len - off;
+        if (chunk > 64u) chunk = 64u;
+
+        s_cdc_tx_busy = true;
+        usb_start_transfer(ep, (uint8_t *)(data + off), chunk);
+        off += chunk;
+    }
 }
 
 /* ---------------------------------------------------------------------- */

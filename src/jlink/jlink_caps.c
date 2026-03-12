@@ -12,6 +12,77 @@
 #define GPIO_FUNC_SIO   5u
 #define GPIO_FUNC_PIO0  6u
 
+/* ------------------------------------------------------------------ */
+/*  Helpers para manipulación de bits en buffers de bytes.             */
+/*  Se usan en el algoritmo híbrido PIO+SIO de hw_jtag3.              */
+/* ------------------------------------------------------------------ */
+
+/*
+ * bits_extract — copia 'count' bits de src[src_off..src_off+count)
+ * al inicio de dst (byte-alineado, bit 0 de dst = bit src_off de src).
+ * Orden LSB-first (compatible con el protocolo J-Link).
+ */
+static void bits_extract(const uint8_t *src, uint32_t src_off,
+                         uint8_t *dst, uint32_t count) {
+    uint32_t dst_bytes = (count + 7u) / 8u;
+    for (uint32_t j = 0u; j < dst_bytes; j++) dst[j] = 0u;
+    for (uint32_t b = 0u; b < count; b++) {
+        uint32_t p = src_off + b;
+        if ((src[p >> 3u] >> (p & 7u)) & 1u)
+            dst[b >> 3u] |= (uint8_t)(1u << (b & 7u));
+    }
+}
+
+/*
+ * bits_insert — copia 'count' bits de src (byte-alineado) a dst
+ * a partir del bit 'dst_off' de dst.
+ * Solo activa bits; dst debe estar inicializado a cero previamente.
+ */
+static void bits_insert(const uint8_t *src, uint32_t dst_off,
+                        uint8_t *dst, uint32_t count) {
+    for (uint32_t b = 0u; b < count; b++) {
+        if ((src[b >> 3u] >> (b & 7u)) & 1u) {
+            uint32_t p = dst_off + b;
+            dst[p >> 3u] |= (uint8_t)(1u << (p & 7u));
+        }
+    }
+}
+
+/*
+ * jtag_bitbang_bits — bit-bang SIO para 'count' bits de TDI/TMS
+ * a partir del bit 'start' dentro de tdi_buf.
+ * TMS ya debe estar fijado por el llamador antes de entrar.
+ * TDI y TCK se cambian temporalmente a SIO y se restauran a PIO0 al salir.
+ */
+static void jtag_bitbang_bits(const uint8_t *tdi_buf, uint8_t *tdo_buf,
+                               uint32_t start, uint32_t count) {
+    io_bank0_hw->io[PIN_TDI].ctrl = GPIO_FUNC_SIO;
+    io_bank0_hw->io[PIN_TCK].ctrl = GPIO_FUNC_SIO;
+    sio_hw->gpio_oe_set = (1u << PIN_TDI) | (1u << PIN_TCK);
+
+    for (uint32_t b = 0u; b < count; b++) {
+        uint32_t p = start + b;
+        uint32_t tdi = (tdi_buf[p >> 3u] >> (p & 7u)) & 1u;
+
+        if (tdi) sio_hw->gpio_set = (1u << PIN_TDI);
+        else     sio_hw->gpio_clr = (1u << PIN_TDI);
+
+        sio_hw->gpio_set = (1u << PIN_TCK);               /* TCK alto */
+
+        if ((sio_hw->gpio_in >> PIN_TDO) & 1u)            /* capturar TDO */
+            tdo_buf[p >> 3u] |= (uint8_t)(1u << (p & 7u));
+
+        sio_hw->gpio_clr = (1u << PIN_TCK);               /* TCK bajo */
+    }
+
+    io_bank0_hw->io[PIN_TDI].ctrl = GPIO_FUNC_PIO0;
+    io_bank0_hw->io[PIN_TCK].ctrl = GPIO_FUNC_PIO0;
+}
+
+/* Buffers estáticos alineados para el run PIO actual (BSS, no stack) */
+static uint8_t s_pio_tdi_tmp[TX_BUF_SIZE];
+static uint8_t s_pio_tdo_tmp[TX_BUF_SIZE];
+
 /*
  * Implementación de los comandos del protocolo J-Link.
  *
@@ -41,7 +112,7 @@
  */
 #define VERSION_BODY_LEN 112
 static const char s_ver_str[] =
-    "J-Link V9 compiled Dec 13 2022 11:14:50\0"
+    "J-Link V9 compiled Mar 05 2026 21:14:50\0"
     "Copyright 2003-2012 SEGGER: www.segger.com";
 
 void jlink_cmd_version(uint8_t *tx_buf, uint16_t *tx_len) {
@@ -124,7 +195,7 @@ void jlink_cmd_get_hw_info(const uint8_t *rx_buf, uint16_t rx_len,
     }
     uint16_t n = (uint16_t)__builtin_popcount(mask) * 4;
     if (n == 0) n = 4;      /* al menos un campo para no enviar 0 bytes */
-    memset(tx_buf, 0, n);
+    memset(tx_buf, 0xFF, n);
     *tx_len = n;
 }
 
@@ -192,8 +263,8 @@ void jlink_cmd_get_state(uint8_t *tx_buf, uint16_t *tx_len) {
     tx_buf[3] = 0;     /* TMS    */
     tx_buf[4] = 0;     /* TCK    */
     tx_buf[5] = 0;     /* TDO    */
-    tx_buf[6] = 0;     /* nTRST  */
-    tx_buf[7] = 0;     /* nRESET */
+    tx_buf[6] = 1;     /* nTRST  (activo-bajo; inactivo = 1) */
+    tx_buf[7] = 1;     /* nRESET (activo-bajo; inactivo = 1) */
     *tx_len = 8;
 }
 
@@ -235,45 +306,55 @@ void jlink_cmd_hw_jtag3(const uint8_t *rx_buf, uint16_t rx_len,
     const uint8_t *tdi_buf = &rx_buf[4u + num_bytes];
 
     /*
-     * Bit-bang por SIO: TDI y TCK se cambian temporalmente a modo SIO
-     * (FUNCSEL=5) porque normalmente los controla el PIO (FUNCSEL=6).
-     * TMS ya está siempre en modo SIO.  TDO siempre es legible desde
-     * sio_hw->gpio_in independientemente de su FUNCSEL.
+     * Algoritmo híbrido PIO+SIO:
+     *
+     * El stream TMS se divide en runs de valor constante (0 ó 1).
+     * Para cada run:
+     *   · TMS se fija por SIO (siempre en modo SIO).
+     *   · Si run_bits < 8: bit-bang SIO (bajo overhead para transiciones TAP cortas).
+     *   · Si run_bits ≥ 8: PIO con DMA — se extraen los bits a un buffer byte-alineado,
+     *     se llama a jtag_pio_write_read, y se insertan los TDO de vuelta en tx_buf.
+     *
+     * TDI y TCK permanecen en modo PIO0 salvo durante los runs de bit-bang cortos,
+     * donde se cambian temporalmente a SIO y se restauran al salir.
+     * TDO es siempre legible desde sio_hw->gpio_in independientemente del FUNCSEL.
+     *
+     * Beneficio: las fases de datos (TMS=0, típicamente 32-1000+ bits) van a la
+     * frecuencia del PIO configurada (por defecto 4 MHz), mientras que las
+     * transiciones de estado TAP (1-6 bits) se sirven con bit-bang de bajo overhead.
      */
-    io_bank0_hw->io[PIN_TDI].ctrl = GPIO_FUNC_SIO;
-    io_bank0_hw->io[PIN_TCK].ctrl = GPIO_FUNC_SIO;
-    sio_hw->gpio_oe_set = (1u << PIN_TDI) | (1u << PIN_TCK);
-
     memset(tx_buf, 0, num_bytes);
 
-    for (uint32_t i = 0u; i < num_bits; i++) {
-        uint32_t byte_idx = i >> 3;
-        uint32_t bit_idx  = i & 7u;
+    uint32_t i = 0u;
+    while (i < num_bits) {
+        /* Valor de TMS para este run */
+        uint8_t tms_val = (tms_buf[i >> 3u] >> (i & 7u)) & 1u;
 
-        uint32_t tms_bit = (tms_buf[byte_idx] >> bit_idx) & 1u;
-        uint32_t tdi_bit = (tdi_buf[byte_idx] >> bit_idx) & 1u;
+        /* Encontrar el fin del run (último bit con el mismo TMS) */
+        uint32_t run_end = i + 1u;
+        while (run_end < num_bits &&
+               ((tms_buf[run_end >> 3u] >> (run_end & 7u)) & 1u) == tms_val)
+            run_end++;
+        uint32_t run_bits = run_end - i;
 
-        /* Fijar TMS y TDI en un solo ciclo de escritura por señal */
-        uint32_t set_mask = (tms_bit << PIN_TMS) | (tdi_bit << PIN_TDI);
-        uint32_t clr_mask = ((1u - tms_bit) << PIN_TMS) |
-                            ((1u - tdi_bit) << PIN_TDI);
-        sio_hw->gpio_set = set_mask;
-        sio_hw->gpio_clr = clr_mask;
+        /* Fijar TMS para el run completo */
+        if (tms_val) sio_hw->gpio_set = (1u << PIN_TMS);
+        else         sio_hw->gpio_clr = (1u << PIN_TMS);
 
-        /* TCK alto */
-        sio_hw->gpio_set = (1u << PIN_TCK);
+        if (run_bits < 8u) {
+            /* Run corto: transición de estado TAP — bit-bang directo */
+            jtag_bitbang_bits(tdi_buf, tx_buf, i, run_bits);
+        } else {
+            /* Run largo: fase de datos — usar PIO con DMA */
+            uint32_t run_bytes = (run_bits + 7u) / 8u;
+            bits_extract(tdi_buf, i, s_pio_tdi_tmp, run_bits);
+            for (uint32_t j = 0u; j < run_bytes; j++) s_pio_tdo_tmp[j] = 0u;
+            jtag_pio_write_read(s_pio_tdi_tmp, s_pio_tdo_tmp, run_bits);
+            bits_insert(s_pio_tdo_tmp, i, tx_buf, run_bits);
+        }
 
-        /* Capturar TDO */
-        if ((sio_hw->gpio_in >> PIN_TDO) & 1u)
-            tx_buf[byte_idx] |= (uint8_t)(1u << bit_idx);
-
-        /* TCK bajo */
-        sio_hw->gpio_clr = (1u << PIN_TCK);
+        i = run_end;
     }
-
-    /* Restaurar TDI y TCK al PIO0 */
-    io_bank0_hw->io[PIN_TDI].ctrl = GPIO_FUNC_PIO0;
-    io_bank0_hw->io[PIN_TCK].ctrl = GPIO_FUNC_PIO0;
 
     *tx_len = (uint16_t)num_bytes;
 }
@@ -434,9 +515,13 @@ void jlink_cmd_idsegger_body(uint8_t subcmd, uint8_t *tx_buf, uint16_t *tx_len) 
 /* ------------------------------------------------------------------ */
 void jlink_cmd_unknown_0e(const uint8_t *rx_buf, uint16_t rx_len,
                           uint8_t *tx_buf, uint16_t *tx_len) {
-    /* Sub-comando 0x0B devuelve 01 00 00 00; el resto devuelve FE FF FF FF */
+    /* Sub-comando 0x0B → 01 00 00 00; sub-comando 0x05 → 00 00 00 00;
+     * resto → FE FF FF FF */
     if (rx_len >= 2 && rx_buf[1] == 0x0B) {
         tx_buf[0] = 0x01; tx_buf[1] = 0x00;
+        tx_buf[2] = 0x00; tx_buf[3] = 0x00;
+    } else if (rx_len >= 2 && rx_buf[1] == 0x05) {
+        tx_buf[0] = 0x00; tx_buf[1] = 0x00;
         tx_buf[2] = 0x00; tx_buf[3] = 0x00;
     } else {
         tx_buf[0] = 0xFE; tx_buf[1] = 0xFF;

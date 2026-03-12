@@ -70,4 +70,9 @@ bool usb_vendor_tx_busy(void);
 /* Devuelve el número de resets de bus USB desde el arranque. */
 uint32_t usb_get_bus_reset_count(void);
 
+/* Envía datos al host por CDC Data IN (EP3 IN, 0x83).
+ * Fragmenta en chunks de 64 bytes y bloquea (spin con ISR activa)
+ * hasta que todos los chunks son aceptados por el hardware. */
+void cdc_send(const uint8_t *data, uint16_t len);
+
 #endif /* USB_DEVICE_H */

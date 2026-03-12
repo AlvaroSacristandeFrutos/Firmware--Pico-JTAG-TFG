@@ -1,6 +1,5 @@
 #include "jtag_pio.h"
 #include "board_config.h"
-#include "jlink_protocol.h"
 
 /*
  * Cabecera generada por pico_generate_pio_header() a partir de jtag.pio.
@@ -22,6 +21,16 @@ static PIO  s_pio    = pio0;
 static uint s_sm     = 0;
 static uint s_offset = 0;
 static int  s_dma_tx = -1;
+static int  s_dma_rx = -1;
+
+/*
+ * Buffer intermedio para el DMA RX.
+ * jtag_pio_write_read usa IN shift_right → los datos capturados quedan en
+ * los bits [31:24] de cada word de 32 bits del RX FIFO.  El DMA lee words
+ * completos (DMA_SIZE_32) aquí; la extracción de bytes se hace después con >> 24.
+ * Tamaño máximo: num_bytes ≤ 1022 (CMD_BUF_SIZE/2 - 2) para hw_jtag3.
+ */
+static uint32_t s_rx_words[1022];
 
 void jtag_pio_init(void) {
     /* ---- TMS, nRST, nTRST → SIO outputs, inactivos (nivel alto) ---- */
@@ -61,7 +70,7 @@ void jtag_pio_init(void) {
      *   div = clk_sys / (freq_hz * 2)
      */
     float div = (float)clock_get_hz(clk_sys) /
-                ((float)(JLINK_DEFAULT_SPEED * 1000u) * 2.0f);
+                ((float)(4000u * 1000u) * 2.0f);  /* 4000 kHz por defecto */
     if (div < 1.0f) div = 1.0f;
     sm_config_set_clkdiv(&c, div);
 
@@ -88,8 +97,9 @@ void jtag_pio_init(void) {
      */
     hw_set_bits(&s_pio->input_sync_bypass, 1u << PIN_TDO);
 
-    /* Reservar un canal DMA para TX (tdi_buf → PIO TX FIFO) */
+    /* Reservar canales DMA: TX (tdi_buf → PIO TX FIFO) y RX (PIO RX FIFO → s_rx_words) */
     s_dma_tx = dma_claim_unused_channel(true);
+    s_dma_rx = dma_claim_unused_channel(true);
 }
 
 void jtag_set_freq(uint32_t freq_khz) {
@@ -108,22 +118,21 @@ void jtag_pio_write_read(const uint8_t *tdi_buf, uint8_t *tdo_buf,
 
     /*
      * Vaciar bytes residuales del RX FIFO.
-     * El 'push' al final del programa PIO puede dejar un word vacío
+     * El 'push' al final del programa PIO puede dejar un word sobrante
      * cuando len_bits era múltiplo de 8 en la transferencia anterior.
      */
     while (!pio_sm_is_rx_fifo_empty(s_pio, s_sm))
         (void)pio_sm_get(s_pio, s_sm);
 
     /*
-     * Enviar el contador de bits (N-1) directamente antes de lanzar el DMA.
+     * Enviar el contador de bits (N-1) directamente antes de lanzar los DMA.
      * El programa PIO comienza con 'pull block' para recogerlo.
      */
     pio_sm_put_blocking(s_pio, s_sm, len_bits - 1u);
 
     /*
-     * TX DMA: transfiere tdi_buf al TX FIFO byte a byte.
-     * OUT shift configurado a la derecha (shift_right=true, en jtag.pio):
-     * el LSB del byte es el primer bit enviado → LSB-first correcto para JTAG.
+     * TX DMA: transfiere tdi_buf al TX FIFO byte a byte (DMA_SIZE_8).
+     * OUT shift a la derecha → LSB del byte sale primero → LSB-first JTAG.
      */
     dma_channel_config tx_cfg = dma_channel_get_default_config(s_dma_tx);
     channel_config_set_read_increment(&tx_cfg, true);
@@ -131,35 +140,41 @@ void jtag_pio_write_read(const uint8_t *tdi_buf, uint8_t *tdo_buf,
     channel_config_set_dreq(&tx_cfg, pio_get_dreq(s_pio, s_sm, true));
     channel_config_set_transfer_data_size(&tx_cfg, DMA_SIZE_8);
     dma_channel_configure(s_dma_tx, &tx_cfg,
-        &s_pio->txf[s_sm],   /* destino fijo: TX FIFO */
-        tdi_buf,              /* origen con incremento */
-        num_bytes,
-        true);                /* arrancar inmediatamente */
+        &s_pio->txf[s_sm], tdi_buf, num_bytes, true);
 
     /*
-     * RX por sondeo de CPU (polling).
-     * IN shift a la derecha (shift_right=true, en jtag.pio): tras 8 bits el
-     * byte capturado reside en los bits [31:24] del word de 32 bits del FIFO.
-     * Se extrae con >> 24.
+     * RX DMA: captura words de 32 bits del RX FIFO → s_rx_words (DMA_SIZE_32).
+     * Con IN shift a la derecha, cada word del FIFO contiene el byte TDO
+     * capturado en los bits [31:24].  La extracción con >> 24 se hace abajo.
+     *
+     * Ambos DMAs corren en paralelo: la CPU queda libre mientras el PIO
+     * genera los clocks JTAG.  En modo multi-core (Core 1), esto permite
+     * que Core 0 siga atendiendo USB durante la transferencia.
      */
-    for (uint32_t i = 0u; i < num_bytes; i++) {
-        while (pio_sm_is_rx_fifo_empty(s_pio, s_sm))
-            ;
-        tdo_buf[i] = (uint8_t)(pio_sm_get(s_pio, s_sm) >> 24);
-    }
+    dma_channel_config rx_cfg = dma_channel_get_default_config(s_dma_rx);
+    channel_config_set_read_increment(&rx_cfg, false);   /* origen fijo: RX FIFO */
+    channel_config_set_write_increment(&rx_cfg, true);
+    channel_config_set_dreq(&rx_cfg, pio_get_dreq(s_pio, s_sm, false));
+    channel_config_set_transfer_data_size(&rx_cfg, DMA_SIZE_32);
+    dma_channel_configure(s_dma_rx, &rx_cfg,
+        s_rx_words, &s_pio->rxf[s_sm], num_bytes, true);
+
+    /* Esperar a que ambos DMA terminen */
+    dma_channel_wait_for_finish_blocking(s_dma_tx);
+    dma_channel_wait_for_finish_blocking(s_dma_rx);
+
+    /* Extraer bytes de los bits [31:24] de cada word */
+    for (uint32_t i = 0u; i < num_bytes; i++)
+        tdo_buf[i] = (uint8_t)(s_rx_words[i] >> 24);
 
     /*
      * Corrección del byte parcial final.
-     * Con IN shift a la derecha, los bits de un byte incompleto aterrizan
-     * en los bits altos del byte 3 (MSB primero).  Desplazar a la derecha
-     * los alinea a las posiciones LSB que espera el protocolo J-Link.
+     * Los bits incompletos aterrizan en los bits altos del byte 3 del word;
+     * desplazar a la derecha los alinea a las posiciones LSB que espera J-Link.
      */
     uint32_t rem = len_bits & 7u;
     if (rem != 0u)
         tdo_buf[num_bytes - 1u] >>= (8u - rem);
-
-    /* Esperar a que el TX DMA termine antes de retornar */
-    dma_channel_wait_for_finish_blocking(s_dma_tx);
 }
 
 void jtag_pio_write(const uint8_t *tdi_buf, uint32_t len_bits) {
