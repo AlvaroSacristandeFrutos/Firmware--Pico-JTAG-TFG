@@ -41,32 +41,6 @@ void usb_start_transfer(struct usb_endpoint_configuration *ep,
  * Devuelve NULL si no existe. */
 struct usb_endpoint_configuration *usb_get_endpoint_configuration(uint8_t addr);
 
-/*
- * Lee los datos recibidos en EP1 OUT (bulk de vendor).
- * Devuelve el número de bytes copiados en buf, o 0 si no hay datos.
- *
- * Importante: esta función NO rearma EP1 OUT. Hay que llamar a
- * usb_vendor_arm_rx() después de haber enviado la respuesta por EP1 IN,
- * para evitar tener ambos endpoints del mismo número activos a la vez
- * (comportamiento problemático en el RP2040).
- */
-uint16_t usb_vendor_read(uint8_t *buf, uint16_t max_len);
-
-/*
- * Rearma EP1 OUT para recibir el siguiente paquete del host.
- * Llamar siempre después de que la respuesta en EP1 IN haya completado.
- */
-void usb_vendor_arm_rx(void);
-
-/* Envía datos por EP1 IN (bulk de vendor).
- * Devuelve true si la transferencia se inició, false si el endpoint
- * estaba ocupado con una transferencia anterior. */
-bool usb_vendor_write(const uint8_t *data, uint16_t len);
-
-/* Devuelve true si EP1 IN tiene una transferencia pendiente.
- * Consulta el registro hardware directamente, no solo el flag interno. */
-bool usb_vendor_tx_busy(void);
-
 /* Devuelve el número de resets de bus USB desde el arranque. */
 uint32_t usb_get_bus_reset_count(void);
 

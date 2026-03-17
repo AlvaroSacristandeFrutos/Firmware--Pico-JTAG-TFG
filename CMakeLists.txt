@@ -32,7 +32,6 @@ target_include_directories(jlink_pico_probe PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/src/board
     ${CMAKE_CURRENT_LIST_DIR}/src/usb
     ${CMAKE_CURRENT_LIST_DIR}/src/jtag
-    ${CMAKE_CURRENT_LIST_DIR}/src/jlink
     ${CMAKE_CURRENT_LIST_DIR}/src/cdc
     ${CMAKE_CURRENT_LIST_DIR}/src/util
     ${CMAKE_CURRENT_BINARY_DIR}
@@ -46,6 +45,7 @@ target_link_libraries(jlink_pico_probe
     hardware_structs
     hardware_irq
     hardware_resets
+    hardware_watchdog
     pico_unique_id
 )
 

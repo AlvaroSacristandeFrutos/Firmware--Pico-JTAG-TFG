@@ -2,11 +2,11 @@
 
 #include <stdbool.h>
 
-/* Initialize LED pin (GP25) — call after gpio_init_all(). */
+/* LED verde (GP14) */
 void led_init(void);
-
-/* Set LED on or off. */
 void led_set(bool on);
-
-/* Toggle LED state. */
 void led_toggle(void);
+
+/* LED rojo (GP15) — indicador de error de protocolo */
+void led_red_set(bool on);
+void led_red_toggle(void);

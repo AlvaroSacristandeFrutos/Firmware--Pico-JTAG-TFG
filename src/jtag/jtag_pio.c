@@ -17,11 +17,12 @@
 #define GPIO_FUNC_SIO   5u
 #define GPIO_FUNC_PIO0  6u
 
-static PIO  s_pio    = pio0;
-static uint s_sm     = 0;
-static uint s_offset = 0;
-static int  s_dma_tx = -1;
-static int  s_dma_rx = -1;
+static PIO      s_pio      = pio0;
+static uint     s_sm       = 0;
+static uint     s_offset   = 0;
+static int      s_dma_tx   = -1;
+static int      s_dma_rx   = -1;
+static uint32_t s_freq_khz = 4000u;   /* frecuencia actual en kHz */
 
 /*
  * Buffer intermedio para el DMA RX.
@@ -104,10 +105,15 @@ void jtag_pio_init(void) {
 
 void jtag_set_freq(uint32_t freq_khz) {
     if (freq_khz == 0u) freq_khz = 1u;
+    s_freq_khz = freq_khz;
     float div = (float)clock_get_hz(clk_sys) /
                 ((float)freq_khz * 1000.0f * 2.0f);
     if (div < 1.0f) div = 1.0f;
     pio_sm_set_clkdiv(s_pio, s_sm, div);
+}
+
+uint32_t jtag_get_freq(void) {
+    return s_freq_khz;
 }
 
 void jtag_pio_write_read(const uint8_t *tdi_buf, uint8_t *tdo_buf,
@@ -175,6 +181,45 @@ void jtag_pio_write_read(const uint8_t *tdi_buf, uint8_t *tdo_buf,
     uint32_t rem = len_bits & 7u;
     if (rem != 0u)
         tdo_buf[num_bytes - 1u] >>= (8u - rem);
+}
+
+void jtag_pio_write_read_exit(const uint8_t *tdi_buf, uint8_t *tdo_buf,
+                               uint32_t len_bits, bool exit_shift) {
+    if (len_bits == 0u) return;
+
+    if (!exit_shift) {
+        jtag_pio_write_read(tdi_buf, tdo_buf, len_bits);
+        return;
+    }
+
+    /* Shift bits 0..len_bits-2 with TMS=0 (current state). */
+    if (len_bits > 1u)
+        jtag_pio_write_read(tdi_buf, tdo_buf, len_bits - 1u);
+
+    /* Raise TMS=1 so the TAP will transition to Exit1 on the next TCK edge. */
+    sio_hw->gpio_set = (1u << PIN_TMS);
+
+    /* Extract last TDI bit and shift it through the PIO. */
+    uint32_t last_idx  = len_bits - 1u;
+    uint8_t  tdi_last  = (tdi_buf[last_idx >> 3u] >> (last_idx & 7u)) & 1u;
+    uint8_t  tdo_last  = 0u;
+    jtag_pio_write_read(&tdi_last, &tdo_last, 1u);
+    /* tdo_last is 0 or 1 after the 1-bit correction inside jtag_pio_write_read. */
+
+    /* Insert last TDO bit into tdo_buf at the correct bit position. */
+    uint32_t byte_idx       = last_idx >> 3u;
+    uint8_t  bit_pos        = (uint8_t)(last_idx & 7u);
+    uint32_t first_call_bytes = (len_bits > 1u) ? ((len_bits - 1u + 7u) / 8u) : 0u;
+
+    if (byte_idx >= first_call_bytes) {
+        /* New byte not written by the first call — initialise clean. */
+        tdo_buf[byte_idx] = tdo_last & 1u;
+    } else {
+        /* Byte was partially filled by the first call — merge the bit. */
+        tdo_buf[byte_idx] &= ~(uint8_t)(1u << bit_pos);
+        if (tdo_last & 1u)
+            tdo_buf[byte_idx] |= (uint8_t)(1u << bit_pos);
+    }
 }
 
 void jtag_pio_write(const uint8_t *tdi_buf, uint32_t len_bits) {

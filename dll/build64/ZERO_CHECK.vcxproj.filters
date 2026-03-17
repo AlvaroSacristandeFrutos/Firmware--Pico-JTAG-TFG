@@ -1,0 +1,13 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <CustomBuild Include="C:\Proyecto\jlink-pico-probe\dll\build64\CMakeFiles\d7e24f63cc166a8230b6a9fbaff4016e\generate.stamp.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="CMake Rules">
+      <UniqueIdentifier>{95AC479F-41C4-3E1C-92FD-0F91BB31D1E4}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>

@@ -24,6 +24,7 @@
 #include "cdc/cdc_uart.h"
 
 #include "hardware/regs/addressmap.h"
+#include "hardware/watchdog.h"
 #define TIMER_TIMELR    (*(volatile uint32_t *)(TIMER_BASE + 0x0Cu))
 
 static uint32_t time_us(void) {
@@ -60,10 +61,16 @@ int main(void) {
 
     led_set(true);   /* enumeración OK */
 
+    /* Iniciar watchdog con ventana de 2 s.
+     * El segundo parámetro (pause_on_debug=true) pausa el temporizador
+     * cuando el depurador detiene la ejecución, evitando resets espúreos. */
+    watchdog_enable(2000, true);
+
     /* ------------------------------------------------------------------
      * Bucle principal
      * ------------------------------------------------------------------ */
     while (true) {
+        watchdog_update();
         usb_device_task();   /* no-op; eventos USB gestionados por ISR */
         cdc_uart_task();     /* drena buffer RX y llama a protocol_feed() */
     }

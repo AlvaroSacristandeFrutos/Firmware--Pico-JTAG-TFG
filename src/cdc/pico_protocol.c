@@ -13,10 +13,11 @@
 
 #include "pico_protocol.h"
 #include "usb_device.h"   /* cdc_send() */
-#include "jtag_pio.h"     /* jtag_pio_write_read(), jtag_pio_write(), jtag_set_freq() */
+#include "jtag_pio.h"     /* jtag_pio_write_read(), jtag_pio_write(), jtag_set_freq(), jtag_get_freq() */
 #include "jtag_tap.h"     /* jtag_tap_reset(), jtag_tap_set_tms() */
 #include "adc.h"          /* adc_read_vref_mv() */
 #include "board_config.h" /* PIN_RST, PIN_TRST */
+#include "led.h"          /* led_red_set() */
 
 #include "hardware/structs/sio.h"
 #include "pico/time.h"    /* busy_wait_us_32() */
@@ -36,13 +37,23 @@
 #define CMD_RESET_HARD  0x04u
 #define CMD_SET_TRST    0x05u
 #define CMD_READ_VREF   0x06u
-#define CMD_WRITE_TMS   0x10u
-#define CMD_SHIFT_DATA  0x11u
+#define CMD_GET_VERSION 0x07u
+#define CMD_GET_STATUS  0x08u
+#define CMD_SET_LED     0x09u
+#define CMD_WRITE_TMS       0x10u
+#define CMD_SHIFT_DATA      0x11u
+#define CMD_GET_HW_VERSION  0x12u   /* devuelve u32 versión hardware */
+#define CMD_GET_CLOCK       0x13u   /* devuelve u32 frecuencia actual en kHz */
+#define CMD_SELECT_IF       0x14u   /* selecciona interfaz: 0=JTAG (único soportado) */
+
+#define FIRMWARE_VERSION "PicoAdapter v1.0"
+/* Versión hardware: 1.0.0 en formato SEGGER (Major<<16 | Minor<<8 | Patch) */
+#define HW_VERSION_U32   0x00010000u
 #define RESP_OK         0x80u
 #define RESP_DATA       0x81u
 #define RESP_ERROR      0x82u
 
-#define MAX_PAYLOAD     1024u
+#define MAX_PAYLOAD     4096u
 
 /* ---------------------------------------------------------------------- */
 /*  Máquina de estados                                                     */
@@ -103,6 +114,7 @@ static void send_resp_ok(void) {
 }
 
 static void send_resp_error(void) {
+    led_red_set(true);   /* encender LED rojo: error de protocolo */
     uint8_t frame[5];
     frame[0] = PROTO_START;
     frame[1] = RESP_ERROR;
@@ -158,24 +170,49 @@ static void handle_set_clock(const uint8_t *payload, uint16_t len) {
  * un ciclo de reloj JTAG.
  */
 static void handle_write_tms(const uint8_t *payload, uint16_t len) {
-    if (len < 1u) {
+    if (len < 2u) {
         send_resp_error();
         return;
     }
-    uint8_t  num_bits = payload[0];
-    uint16_t needed   = 1u + ((uint16_t)num_bits + 7u) / 8u;
+    /* num_bits: u16 LE — permite hasta 65535 bits de TMS */
+    uint16_t num_bits = (uint16_t)payload[0] | ((uint16_t)payload[1] << 8u);
+    uint16_t needed   = 2u + (num_bits + 7u) / 8u;
     if (len < needed) {
-        /* El payload no contiene todos los bytes TMS prometidos por num_bits */
         send_resp_error();
         return;
     }
-    const uint8_t *tms_bytes = payload + 1u;
-    static const uint8_t zero = 0u;
+    const uint8_t *tms_bytes = payload + 2u;
 
-    for (uint8_t i = 0; i < num_bits; i++) {
-        bool tms = (bool)((tms_bytes[i >> 3u] >> (i & 7u)) & 1u);
-        jtag_tap_set_tms(tms);
-        jtag_pio_write(&zero, 1u);   /* 1 bit = 1 pulso TCK */
+    /*
+     * Optimización: agrupar bits consecutivos con el mismo nivel de TMS
+     * y enviarlos en una única llamada DMA en lugar de un DMA por bit.
+     *
+     * TMS se controla por SIO (pin fijo entre pulsos del mismo nivel);
+     * TCK lo genera el PIO para el bloque completo.  Esto reduce el
+     * número de transacciones DMA de N (bits) a K (transiciones TMS),
+     * que en JTAG típico es O(comandos) en lugar de O(bits).
+     *
+     * Buffer de ceros para TDI: 64 bytes = 512 bits por llamada DMA.
+     * jtag_pio_write() ya fragmenta internamente en chunks de 512 bits.
+     */
+    static const uint8_t k_zeros[64] = {0u};
+
+    uint16_t i = 0u;
+    while (i < num_bits) {
+        bool tms_val = (bool)((tms_bytes[i >> 3u] >> (i & 7u)) & 1u);
+        jtag_tap_set_tms(tms_val);
+
+        /* Contar cuántos bits consecutivos comparten el mismo nivel TMS */
+        uint16_t run = 1u;
+        while ((i + run) < num_bits && run < 512u) {
+            bool next = (bool)((tms_bytes[(i + run) >> 3u] >> ((i + run) & 7u)) & 1u);
+            if (next != tms_val) break;
+            run++;
+        }
+
+        /* Generar 'run' pulsos TCK en una sola operación DMA */
+        jtag_pio_write(k_zeros, (uint32_t)run);
+        i = (uint16_t)(i + run);
     }
     send_resp_ok();
 }
@@ -196,8 +233,8 @@ static void handle_shift_data(const uint8_t *payload, uint16_t len) {
                       | ((uint32_t)payload[1] << 8u)
                       | ((uint32_t)payload[2] << 16u)
                       | ((uint32_t)payload[3] << 24u);
-    /* payload[4] = exitShift — ignorado */
-    uint32_t num_bytes = (num_bits + 7u) / 8u;
+    bool     exit_shift = (payload[4] != 0u);
+    uint32_t num_bytes  = (num_bits + 7u) / 8u;
 
     /* Validar que el payload contiene todos los bytes TDI prometidos */
     if (num_bytes > (uint32_t)sizeof(s_tdo_buf) ||
@@ -207,7 +244,7 @@ static void handle_shift_data(const uint8_t *payload, uint16_t len) {
     }
     const uint8_t *tdi = payload + 5u;
 
-    jtag_pio_write_read(tdi, s_tdo_buf, num_bits);
+    jtag_pio_write_read_exit(tdi, s_tdo_buf, num_bits, exit_shift);
     send_resp_data(s_tdo_buf, (uint16_t)num_bytes);
 }
 
@@ -221,7 +258,8 @@ static void handle_reset_hard(const uint8_t *payload, uint16_t len) {
     uint16_t ms = (len >= 2u)
         ? (uint16_t)((uint16_t)payload[0] | ((uint16_t)payload[1] << 8u))
         : 0u;
-    if (ms == 0u) ms = 10u;
+    if (ms == 0u)    ms = 10u;
+    if (ms > 1000u)  ms = 1000u;   /* cap: no superar la ventana del watchdog (2 s) */
     sio_hw->gpio_clr = (1u << PIN_RST);
     busy_wait_us_32((uint32_t)ms * 1000u);
     sio_hw->gpio_set = (1u << PIN_RST);
@@ -254,11 +292,105 @@ static void handle_read_vref(void) {
     send_resp_data(data, 2u);
 }
 
+/*
+ * CMD_GET_VERSION — sin payload
+ *
+ * Devuelve el string de versión del firmware (ASCII, null-terminated).
+ * sizeof(FIRMWARE_VERSION) incluye el '\0' implícito del literal de cadena.
+ */
+static void handle_get_version(void) {
+    send_resp_data((const uint8_t *)FIRMWARE_VERSION,
+                   (uint16_t)(sizeof(FIRMWARE_VERSION) - 1u));
+}
+
+/*
+ * CMD_GET_HW_VERSION — sin payload
+ *
+ * Devuelve la versión hardware como u32 LE en formato SEGGER:
+ *   bits[31:16] = Major, bits[15:8] = Minor, bits[7:0] = Patch
+ * Valor: 0x00010000 → v1.0.0
+ */
+static void handle_get_hw_version(void) {
+    const uint32_t v = HW_VERSION_U32;
+    uint8_t data[4] = {
+        (uint8_t)( v        & 0xFFu),
+        (uint8_t)((v >>  8) & 0xFFu),
+        (uint8_t)((v >> 16) & 0xFFu),
+        (uint8_t)((v >> 24) & 0xFFu),
+    };
+    send_resp_data(data, 4u);
+}
+
+/*
+ * CMD_GET_CLOCK — sin payload
+ *
+ * Devuelve la frecuencia JTAG actual en kHz como u32 LE.
+ */
+static void handle_get_clock(void) {
+    const uint32_t khz = jtag_get_freq();
+    uint8_t data[4] = {
+        (uint8_t)( khz        & 0xFFu),
+        (uint8_t)((khz >>  8) & 0xFFu),
+        (uint8_t)((khz >> 16) & 0xFFu),
+        (uint8_t)((khz >> 24) & 0xFFu),
+    };
+    send_resp_data(data, 4u);
+}
+
+/*
+ * CMD_SELECT_IF — payload: [iface: u8]
+ *
+ * Selecciona la interfaz de depuración:
+ *   0x00 = JTAG (soportado)
+ *   0x01 = SWD  (no implementado → RESP_ERROR)
+ * Responde RESP_OK si JTAG, RESP_ERROR si cualquier otro valor.
+ */
+static void handle_select_if(const uint8_t *payload, uint16_t len) {
+    if (len < 1u) { send_resp_error(); return; }
+    if (payload[0] == 0x00u) send_resp_ok();
+    else send_resp_error();
+}
+
+/*
+ * CMD_GET_STATUS — sin payload
+ *
+ * Devuelve 4 bytes:
+ *   [0] flags: bit0=USB configurado, bit1=Vref>1500 mV (target presente)
+ *   [1] Vref mV byte bajo
+ *   [2] Vref mV byte alto
+ *   [3] 0x00 reservado
+ */
+static void handle_get_status(void) {
+    uint16_t mv = adc_read_vref_mv();
+    uint8_t flags = 0x01u;                       /* bit0: USB siempre configurado aquí */
+    if (mv > 1500u) flags |= 0x02u;             /* bit1: target presente */
+    uint8_t data[4] = {
+        flags,
+        (uint8_t)(mv & 0xFFu),
+        (uint8_t)(mv >> 8u),
+        0x00u
+    };
+    send_resp_data(data, 4u);
+}
+
+/*
+ * CMD_SET_LED — payload: [mask: u8]
+ *   bit0 = LED verde (GP14): 1=encendido, 0=apagado
+ *   bit1 = LED rojo  (GP15): 1=encendido, 0=apagado
+ */
+static void handle_set_led(const uint8_t *payload, uint16_t len) {
+    if (len < 1u) { send_resp_error(); return; }
+    led_set((payload[0] & 0x01u) != 0u);
+    led_red_set((payload[0] & 0x02u) != 0u);
+    send_resp_ok();
+}
+
 /* ---------------------------------------------------------------------- */
 /*  Dispatcher                                                             */
 /* ---------------------------------------------------------------------- */
 
 static void dispatch(void) {
+    led_red_set(false);   /* apagar LED rojo: trama válida recibida */
     switch (s_cmd) {
     case CMD_PING:
         handle_ping();
@@ -278,15 +410,32 @@ static void dispatch(void) {
     case CMD_READ_VREF:
         handle_read_vref();
         break;
+    case CMD_GET_VERSION:
+        handle_get_version();
+        break;
+    case CMD_GET_STATUS:
+        handle_get_status();
+        break;
+    case CMD_SET_LED:
+        handle_set_led(s_payload, s_len);
+        break;
     case CMD_WRITE_TMS:
         handle_write_tms(s_payload, s_len);
         break;
     case CMD_SHIFT_DATA:
         handle_shift_data(s_payload, s_len);
         break;
+    case CMD_GET_HW_VERSION:
+        handle_get_hw_version();
+        break;
+    case CMD_GET_CLOCK:
+        handle_get_clock();
+        break;
+    case CMD_SELECT_IF:
+        handle_select_if(s_payload, s_len);
+        break;
     default:
-        /* Comando desconocido: responder RESP_OK sin bloquear */
-        send_resp_ok();
+        send_resp_error();
         break;
     }
 }

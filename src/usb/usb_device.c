@@ -48,12 +48,6 @@ static uint8_t  ep0_pending_buf[128];
 static uint16_t ep0_pending_total = 0;   /* bytes totales a enviar */
 static uint16_t ep0_pending_sent  = 0;   /* bytes ya enviados */
 
-/* Estado del endpoint bulk de vendor (EP3) */
-static volatile bool     vendor_rx_ready = false;
-static volatile uint16_t vendor_rx_len   = 0;
-static uint8_t           vendor_rx_buf[64];
-static volatile bool     vendor_tx_busy  = false;
-
 /* Estado del endpoint CDC Data IN (EP3 IN, 0x83) */
 static volatile bool s_cdc_tx_busy = false;
 
@@ -230,9 +224,7 @@ static void usb_set_device_configuration(volatile struct usb_setup_packet *pkt) 
     configured = true;
 
     usb_reset_endpoint_pids();
-    vendor_rx_ready = false;
-    vendor_tx_busy  = false;
-    s_cdc_tx_busy   = false;
+    s_cdc_tx_busy = false;
 
     /* Armar EP3 OUT (CDC data): el host puede enviar comandos del protocolo */
     usb_start_transfer(usb_get_endpoint_configuration(CDC_EP_DATA_OUT), NULL, 64);
@@ -248,17 +240,9 @@ static void usb_handle_clear_feature(volatile struct usb_setup_packet *pkt) {
         if (ep) {
             ep->next_pid = 0;
             if (!(ep_addr & USB_DIR_IN)) {
-                if (ep_addr == EP1_OUT_ADDR) {
-                    /* J-Link OUT (EP2 OUT, 0x02) */
-                    vendor_rx_ready = false;
-                    usb_start_transfer(ep, NULL, 64);
-                } else if (ep_addr == CDC_EP_DATA_OUT) {
+                if (ep_addr == CDC_EP_DATA_OUT) {
                     /* CDC data OUT — re-armar para absorber datos */
                     usb_start_transfer(ep, NULL, 64);
-                }
-            } else {
-                if (ep_addr == EP2_IN_ADDR) {
-                    vendor_tx_busy = false;
                 }
             }
         }
@@ -360,21 +344,18 @@ static void usb_bus_reset(void) {
 
     ep0_pending_total = 0;
     ep0_pending_sent  = 0;
-    vendor_rx_ready   = false;
-    vendor_tx_busy    = false;
     s_cdc_tx_busy     = false;
 
     /*
-     * Limpiar explícitamente el buffer_control de EP3 IN (J-Link TX).
+     * Limpiar explícitamente el buffer_control de EP3 IN (CDC TX).
      * Si el bus reset llega mientras hay una transferencia en progreso
      * (AVAIL=1), el registro queda con datos obsoletos en el DPRAM.
-     * La próxima vez que jlink.sys enumera y lee EP3 IN, recibiría
-     * ese byte fantasma antes de enviar ningún comando, desincronizando
-     * el protocolo. Escribir 0 elimina tanto AVAIL como FULL.
+     * El host recibiría ese byte fantasma antes de que el protocolo
+     * esté sincronizado. Escribir 0 elimina tanto AVAIL como FULL.
      */
-    struct usb_endpoint_configuration *ep_jlink_in =
-        usb_get_endpoint_configuration(EP2_IN_ADDR);
-    if (ep_jlink_in) *ep_jlink_in->buffer_control = 0;
+    struct usb_endpoint_configuration *ep_cdc_in =
+        usb_get_endpoint_configuration(CDC_EP_DATA_IN);
+    if (ep_cdc_in) *ep_cdc_in->buffer_control = 0;
 
     for (int i = 0; i < USB_NUM_ENDPOINTS; i++) {
         if (dev_config.endpoints[i].descriptor)
@@ -420,20 +401,6 @@ void ep0_in_handler(uint8_t *buf, uint16_t len) {
 
 void ep0_out_handler(uint8_t *buf, uint16_t len) {
     (void)buf; (void)len;
-}
-
-/* EP3 OUT (0x03): el host envía un comando J-Link */
-void ep1_out_handler(uint8_t *buf, uint16_t len) {
-    if (len > 64) len = 64;
-    memcpy(vendor_rx_buf, buf, len);
-    vendor_rx_len   = len;
-    vendor_rx_ready = true;
-}
-
-/* EP2 IN (0x82): la respuesta J-Link se ha enviado al host */
-void ep2_in_handler(uint8_t *buf, uint16_t len) {
-    (void)buf; (void)len;
-    vendor_tx_busy = false;
 }
 
 /* EP1 IN (0x81): CDC notify — nunca se arma, handler por completitud */
@@ -555,51 +522,3 @@ bool usb_is_enumerated(void) {
     return enumerated;
 }
 
-uint16_t usb_vendor_read(uint8_t *buf, uint16_t max_len) {
-    if (!vendor_rx_ready) return 0;
-
-    uint16_t len = vendor_rx_len;
-    if (len > max_len) len = max_len;
-    memcpy(buf, vendor_rx_buf, len);
-
-    vendor_rx_ready = false;
-    vendor_rx_len   = 0;
-
-    return len;
-}
-
-void usb_vendor_arm_rx(void) {
-    usb_start_transfer(usb_get_endpoint_configuration(EP1_OUT_ADDR), NULL, 64);
-}
-
-bool usb_vendor_write(const uint8_t *data, uint16_t len) {
-    if (vendor_tx_busy) {
-        struct usb_endpoint_configuration *ep =
-            usb_get_endpoint_configuration(EP2_IN_ADDR);
-        uint32_t bc = *ep->buffer_control;
-        if (!(bc & USB_BUF_CTRL_AVAIL)) {
-            vendor_tx_busy = false;
-        } else {
-            return false;
-        }
-    }
-    if (len > 64) len = 64;
-
-    vendor_tx_busy = true;
-    usb_start_transfer(usb_get_endpoint_configuration(EP2_IN_ADDR),
-                       (uint8_t *)data, len);
-    return true;
-}
-
-bool usb_vendor_tx_busy(void) {
-    if (!vendor_tx_busy) return false;
-
-    struct usb_endpoint_configuration *ep =
-        usb_get_endpoint_configuration(EP2_IN_ADDR);
-    uint32_t bc = *ep->buffer_control;
-    if (!(bc & USB_BUF_CTRL_AVAIL)) {
-        vendor_tx_busy = false;
-        return false;
-    }
-    return true;
-}
