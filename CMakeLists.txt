@@ -19,6 +19,7 @@ add_executable(jlink_pico_probe
     src/jtag/jtag_tap.c
     src/cdc/cdc_uart.c
     src/cdc/pico_protocol.c
+    src/uart/uart_driver.c
     src/util/led.c
     src/util/adc.c
 )
@@ -33,6 +34,7 @@ target_include_directories(jlink_pico_probe PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/src/usb
     ${CMAKE_CURRENT_LIST_DIR}/src/jtag
     ${CMAKE_CURRENT_LIST_DIR}/src/cdc
+    ${CMAKE_CURRENT_LIST_DIR}/src/uart
     ${CMAKE_CURRENT_LIST_DIR}/src/util
     ${CMAKE_CURRENT_BINARY_DIR}
 )
@@ -44,6 +46,7 @@ target_link_libraries(jlink_pico_probe
     hardware_regs
     hardware_structs
     hardware_irq
+    hardware_uart
     hardware_resets
     hardware_watchdog
     pico_unique_id

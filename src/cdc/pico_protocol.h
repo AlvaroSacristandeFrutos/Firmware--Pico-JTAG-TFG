@@ -15,3 +15,11 @@
  * Si el CRC es incorrecto, la trama se descarta silenciosamente.
  */
 void protocol_feed(uint8_t byte);
+
+/* ---------------------------------------------------------------------- */
+/*  Códigos de comando UART (debug del target)                            */
+/* ---------------------------------------------------------------------- */
+
+#define CMD_UART_SET_BAUD  0x20u   /* payload: u32 LE (Hz)  → RESP_OK   */
+#define CMD_UART_SEND      0x21u   /* payload: N bytes      → RESP_OK   */
+#define CMD_UART_RECV      0x22u   /* payload: —            → RESP_DATA */

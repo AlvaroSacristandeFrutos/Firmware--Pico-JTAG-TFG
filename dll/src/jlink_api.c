@@ -518,3 +518,55 @@ void __cdecl JLINK_PICO_SetLED(int mask) {
 void __cdecl JLINK_PICO_GetVersion(char *pBuf, int bufSize) {
     JLINKARM_GetFirmwareString(pBuf, bufSize);
 }
+
+/* ======================================================================
+ * UART del target (GP12=TX, GP13=RX)
+ * ====================================================================== */
+
+/*
+ * PICO_UART_SetBaud — cambia la velocidad de la UART del target.
+ * Llamar antes de enviar/recibir si el target no usa 115200.
+ */
+void __cdecl PICO_UART_SetBaud(uint32_t baud) {
+    if (!g_is_open) return;
+    uint8_t pl[4] = {
+        (uint8_t)( baud        & 0xFFu),
+        (uint8_t)((baud >>  8) & 0xFFu),
+        (uint8_t)((baud >> 16) & 0xFFu),
+        (uint8_t)((baud >> 24) & 0xFFu)
+    };
+    uint8_t  resp;
+    uint8_t  buf[4];
+    uint16_t rlen;
+    if (pico_send(g_hCOM, CMD_UART_SET_BAUD, pl, 4u))
+        pico_recv(g_hCOM, &resp, buf, &rlen, 200u);
+}
+
+/*
+ * PICO_UART_Send — envía data[0..len-1] al target por UART (GP12 TX).
+ * Devuelve len si OK, -1 si error.
+ */
+int __cdecl PICO_UART_Send(const uint8_t *data, uint16_t len) {
+    if (!g_is_open || !data || len == 0u) return -1;
+    if (!pico_send(g_hCOM, CMD_UART_SEND, data, len)) return -1;
+    uint8_t  resp;
+    uint8_t  tmp[4];
+    uint16_t rlen;
+    if (!pico_recv(g_hCOM, &resp, tmp, &rlen, 500u)) return -1;
+    return (resp == RESP_OK) ? (int)len : -1;
+}
+
+/*
+ * PICO_UART_Recv — lee bytes pendientes del buffer RX UART (GP13 RX).
+ * Copia hasta max_len bytes en buf.
+ * Devuelve el número de bytes copiados (puede ser 0), o -1 si error.
+ */
+int __cdecl PICO_UART_Recv(uint8_t *buf, uint16_t max_len) {
+    if (!g_is_open || !buf) return -1;
+    if (!pico_send(g_hCOM, CMD_UART_RECV, NULL, 0u)) return -1;
+    uint8_t  resp;
+    uint16_t rlen = 0u;
+    if (!pico_recv(g_hCOM, &resp, buf, &rlen, 200u)) return -1;
+    if (rlen > max_len) rlen = max_len;
+    return (int)rlen;
+}

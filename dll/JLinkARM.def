@@ -41,3 +41,6 @@ EXPORTS
     JLINKARM_SetErrorOutHandler
     JLINK_PICO_SetLED
     JLINK_PICO_GetVersion
+    PICO_UART_SetBaud
+    PICO_UART_Send
+    PICO_UART_Recv

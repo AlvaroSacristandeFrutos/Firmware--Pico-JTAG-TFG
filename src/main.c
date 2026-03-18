@@ -22,6 +22,7 @@
 #include "usb/usb_device.h"
 #include "jtag/jtag_pio.h"
 #include "cdc/cdc_uart.h"
+#include "uart/uart_driver.h"
 
 #include "hardware/regs/addressmap.h"
 #include "hardware/watchdog.h"
@@ -39,6 +40,7 @@ int main(void) {
     led_init();
     adc_sense_init();
     jtag_pio_init();
+    uart_driver_init(115200u);
     cdc_uart_init();
     usb_device_init();
 

@@ -1,0 +1,28 @@
+#pragma once
+/*
+ * uart_driver.h — Driver UART0 para debug del target.
+ *
+ * Inicializa el periférico UART0 del RP2040 en GP12 (TX) / GP13 (RX).
+ * La recepción es asíncrona (IRQ-driven) con buffer circular de 512 bytes.
+ * La transmisión es bloqueante (usa el FIFO hardware de 32 bytes de UART0).
+ *
+ * Comandos protocolo PicoAdapter:
+ *   CMD_UART_SET_BAUD (0x20) — configura baudrate
+ *   CMD_UART_SEND     (0x21) — envía bytes al target
+ *   CMD_UART_RECV     (0x22) — lee bytes recibidos del target
+ */
+
+#include <stdint.h>
+
+/* Inicializa UART0 a la velocidad indicada y activa IRQ RX. */
+void     uart_driver_init(uint32_t baud_hz);
+
+/* Cambia la velocidad en tiempo de ejecución. */
+void     uart_driver_set_baud(uint32_t baud_hz);
+
+/* Envía len bytes al target (bloqueante). */
+void     uart_driver_send(const uint8_t *data, uint16_t len);
+
+/* Copia hasta max_len bytes del buffer RX en buf. No bloqueante.
+ * Devuelve el número de bytes copiados (puede ser 0). */
+uint16_t uart_driver_recv(uint8_t *buf, uint16_t max_len);
