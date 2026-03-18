@@ -79,8 +79,6 @@ Circuito objetivo (FPGA, MCU, PCB...)
 - **Cable micro-USB de datos**: muchos cables USB baratos solo tienen los cables de alimentación
   y no los de datos. Si el Pico no aparece en el PC, prueba con otro cable.
 - **PC con Windows 10 o Windows 11 de 64 bits** (x64).
-- *(Opcional)* Level-shifter bidireccional 3.3 V ↔ voltaje del target, si el circuito
-  objetivo no trabaja a 3.3 V.
 
 ---
 
