@@ -7,7 +7,7 @@
  *
  * Core 0:
  *   - Atiende USB (interrupt-driven, usb_device_task() es un no-op)
- *   - Drena el buffer CDC RX y alimenta el parser (cdc_uart_task())
+ *   - Drena el buffer CDC RX y alimenta el parser (cdc_rx_task())
  *
  * Core 1: no utilizado en esta versión.
  */
@@ -21,7 +21,7 @@
 #include "util/adc.h"
 #include "usb/usb_device.h"
 #include "jtag/jtag_pio.h"
-#include "cdc/cdc_uart.h"
+#include "cdc/cdc_rx.h"
 #include "uart/uart_driver.h"
 
 #include "hardware/regs/addressmap.h"
@@ -37,11 +37,10 @@ static uint32_t time_us(void) {
 /* ---------------------------------------------------------------------- */
 int main(void) {
     gpio_init_all();
-    led_init();
     adc_sense_init();
     jtag_pio_init();
     uart_driver_init(115200u);
-    cdc_uart_init();
+    cdc_rx_init();
     usb_device_init();
 
     /* Esperar hasta 15 s a que el host configure el dispositivo USB.
@@ -61,7 +60,8 @@ int main(void) {
         }
     }
 
-    led_set(true);   /* enumeración OK */
+    led_set(true);       /* verde fijo: enumeración OK */
+    led_red_set(false);  /* rojo apagado: sin errores al arrancar */
 
     /* Iniciar watchdog con ventana de 2 s.
      * El segundo parámetro (pause_on_debug=true) pausa el temporizador
@@ -73,7 +73,6 @@ int main(void) {
      * ------------------------------------------------------------------ */
     while (true) {
         watchdog_update();
-        usb_device_task();   /* no-op; eventos USB gestionados por ISR */
-        cdc_uart_task();     /* drena buffer RX y llama a protocol_feed() */
+        cdc_rx_task();       /* drena buffer RX y llama a protocol_feed() */
     }
 }

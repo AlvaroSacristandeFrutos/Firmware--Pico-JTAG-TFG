@@ -44,7 +44,11 @@ int      g_jtag_ir_len    = 0;
 int      g_jtag_dev_pos   = 0;
 
 JLINKARM_JTAG_DEVICE_CONF g_dev_list[32];
-int                        g_dev_count = 0;
+int                        g_dev_count    = 0;
+uint32_t                   g_total_ir_len = 0u;
+
+/* Estado TAP rastreado desde la DLL — se actualiza en cada StoreRaw/StoreGetRaw */
+tap_state_t g_tap_state = TAP_RESET;
 
 JLINKARM_LOG_FUNC *g_warn_cb  = NULL;
 JLINKARM_LOG_FUNC *g_error_cb = NULL;
@@ -271,6 +275,9 @@ uint32_t __cdecl JLINKARM_GetSpeed(void) {
 void __cdecl JLINKARM_Reset(void) {
     if (!g_is_open) return;
     pico_transact(g_hCOM, CMD_RESET_TAP, NULL, 0u, NULL, NULL, 500u);
+    /* CMD_RESET_TAP envía 5×TMS=1 + 1×TMS=0 → TAP queda en RTI */
+    tap_track_reset();
+    g_tap_state = TAP_IDLE;
 }
 
 void __cdecl JLINKARM_ResetTarget(void) {
@@ -305,16 +312,58 @@ int __cdecl JLINKARM_JTAG_StoreRaw(const uint8_t *pTDI,
                                     const uint8_t *pTMS,
                                     uint32_t       numBits) {
     if (!g_is_open) return -1;
+    int ret;
 
     switch (classify_tms(pTMS, numBits)) {
     case TMS_ALL_ZERO:
-        return jtag_shift_data(pTDI, NULL, numBits, false) ? 0 : -1;
-    case TMS_NAV_ONLY:
-        return jtag_write_tms(pTMS, numBits) ? 0 : -1;
-    case TMS_MIXED:
-        return jtag_store_raw_bitbang(pTDI, NULL, pTMS, numBits) ? 0 : -1;
+        ret = jtag_shift_data(pTDI, NULL, numBits, false) ? 0 : -1;
+        break;
+    case TMS_NAV_ONLY: {
+        /* Caso simple: N-1 bits TMS=0 + último bit TMS=1.
+         * Usar shift_data(exit=true) para preservar TDI en todos los bits. */
+        uint32_t last = numBits - 1u;
+        bool exit_bit = (bool)((pTMS[last >> 3u] >> (last & 7u)) & 1u);
+        ret = jtag_shift_data(pTDI, NULL, numBits, exit_bit) ? 0 : -1;
+        break;
     }
-    return 0;
+    case TMS_MIXED:
+    default:
+        /* TMS mixto real: bitbang bit a bit para preservar TDI correctamente.
+         * Más lento (1 round-trip por bit) pero necesario para mantener TDI válido
+         * cuando hay cambios de TMS intercalados con datos (p.ej. EXTEST sobre IR). */
+        ret = jtag_store_raw_bitbang(pTDI, NULL, pTMS, numBits) ? 0 : -1;
+        break;
+    }
+
+    /* Actualizar el estado TAP rastreado */
+    tap_track_tms(pTMS, numBits);
+    g_tap_state = tap_track_state();
+    return ret;
+}
+
+/*
+ * Buffers estáticos para bypass padding en StoreGetRaw multi-dispositivo.
+ * 4096 bytes = suficiente para cualquier cadena de hasta 32 dispositivos.
+ */
+static uint8_t s_pad_tdi[PICO_MAX_PAYLOAD];
+static uint8_t s_pad_tdo[PICO_MAX_PAYLOAD];
+
+/*
+ * Copia numBits bits desde src_buf[src_off..] hacia dst_buf[dst_off..].
+ * Los bits restantes de dst_buf deben estar pre-inicializados por el llamador.
+ */
+static void bits_copy(uint8_t *dst_buf, uint32_t dst_off,
+                      const uint8_t *src_buf, uint32_t src_off,
+                      uint32_t nbits) {
+    for (uint32_t i = 0u; i < nbits; i++) {
+        uint32_t si = src_off + i;
+        uint32_t di = dst_off + i;
+        uint8_t  b  = (src_buf[si >> 3u] >> (si & 7u)) & 1u;
+        if (b)
+            dst_buf[di >> 3u] |=  (uint8_t)(1u << (di & 7u));
+        else
+            dst_buf[di >> 3u] &= ~(uint8_t)(1u << (di & 7u));
+    }
 }
 
 int __cdecl JLINKARM_JTAG_StoreGetRaw(const uint8_t *pTDI,
@@ -324,32 +373,123 @@ int __cdecl JLINKARM_JTAG_StoreGetRaw(const uint8_t *pTDI,
     if (!g_is_open) return -1;
     if (numBits == 0u) return 0;
 
+    int ret;
+    tap_state_t cur = tap_track_state();
+    bool apply_bypass = (g_dev_count > 1) &&
+                        (cur == TAP_SHIFT_DR || cur == TAP_SHIFT_IR);
+
+    if (apply_bypass) {
+        /*
+         * Bypass padding transparente para multi-dispositivo.
+         *
+         * Cadena: TDI → Dev0 → Dev1 → … → DevN-1 → TDO
+         * Target en posición g_jtag_dev_pos (0-indexed desde TDI).
+         *
+         * Shift-DR: cada dispositivo en BYPASS aporta 1 bit de DR.
+         *   pre_bits  = g_jtag_dev_pos        (devs antes, más cerca de TDI)
+         *   post_bits = N - pos - 1           (devs después, más cerca de TDO)
+         *
+         * Shift-IR: cada dispositivo en BYPASS aporta IRLen[i] bits de IR.
+         *   pre_bits  = sum(IRLen[0..pos-1])  (rellenamos con 1s = BYPASS instruction)
+         *   post_bits = sum(IRLen[pos+1..N-1])
+         *
+         * El exit bit (TMS=1 en el último bit) se mueve al último bit de la
+         * secuencia paddeada (total_bits-1), no al último bit del target.
+         * Esto garantiza que el TAP no sale de Shift antes de desplazar los
+         * bypass bits post-target.
+         */
+        int pos = g_jtag_dev_pos;
+        if (pos < 0 || pos >= g_dev_count) pos = 0;
+
+        uint32_t pre_bits  = 0u;
+        uint32_t post_bits = 0u;
+        bool     pad_ones  = (cur == TAP_SHIFT_IR);  /* BYPASS IR = todos 1s */
+
+        if (cur == TAP_SHIFT_DR) {
+            pre_bits  = (uint32_t)pos;
+            post_bits = (uint32_t)(g_dev_count - pos - 1);
+        } else {
+            for (int i = 0; i < pos; i++)
+                pre_bits  += (uint32_t)g_dev_list[i].IRLen;
+            for (int i = pos + 1; i < g_dev_count; i++)
+                post_bits += (uint32_t)g_dev_list[i].IRLen;
+        }
+
+        uint32_t total_bits  = pre_bits + numBits + post_bits;
+        uint32_t total_bytes = (total_bits + 7u) / 8u;
+
+        if (total_bytes <= (uint32_t)sizeof(s_pad_tdi)) {
+            /* ---- Construir TDI padded ----
+             * pre_bits  → relleno (0s para DR, 1s para IR BYPASS)
+             * numBits   → datos reales del target
+             * post_bits → relleno (0s para DR, 1s para IR BYPASS) */
+            memset(s_pad_tdi, pad_ones ? 0xFFu : 0x00u, total_bytes);
+            bits_copy(s_pad_tdi, pre_bits, pTDI, 0u, numBits);
+
+            memset(s_pad_tdo, 0, total_bytes);
+
+            /* ---- Determinar si la transferencia original tiene exit ----
+             * Para el padded transfer: el exit se coloca en el último bit TOTAL,
+             * no en el último bit del target, para desplazar también los bypass post. */
+            tms_class_t cls = classify_tms(pTMS, numBits);
+            bool exit_bit = false;
+            if (cls == TMS_NAV_ONLY) {
+                uint32_t last = numBits - 1u;
+                exit_bit = (bool)((pTMS[last >> 3u] >> (last & 7u)) & 1u);
+            }
+
+            /* ---- Shift del total paddeado ---- */
+            ret = jtag_shift_data(s_pad_tdi, s_pad_tdo, total_bits, exit_bit) ? 0 : -1;
+
+            /* ---- Extraer bits del target desde TDO paddeado ---- */
+            if (ret == 0 && pTDO) {
+                uint32_t out_bytes = (numBits + 7u) / 8u;
+                memset(pTDO, 0, out_bytes);
+                bits_copy(pTDO, 0u, s_pad_tdo, pre_bits, numBits);
+            }
+
+            /* ---- Actualizar TAP tracker con TMS equivalente ----
+             * El TMS padded es (total_bits-1) ceros + exit_bit. */
+            static uint8_t s_zero_tms[PICO_MAX_PAYLOAD] = {0};
+            tap_track_tms(s_zero_tms, exit_bit ? total_bits - 1u : total_bits);
+            if (exit_bit) {
+                uint8_t one = 0x01u;
+                tap_track_tms(&one, 1u);
+            }
+            g_tap_state = tap_track_state();
+            return ret;
+        }
+        /* Cadena demasiado larga para el buffer → caer al path normal */
+    }
+
+    /* ---- Path normal (single-device o bypass desactivado) ---- */
     switch (classify_tms(pTMS, numBits)) {
     case TMS_ALL_ZERO:
-        return jtag_shift_data(pTDI, pTDO, numBits, false) ? 0 : -1;
+        ret = jtag_shift_data(pTDI, pTDO, numBits, false) ? 0 : -1;
+        break;
 
     case TMS_NAV_ONLY: {
-        /* Navegar con TMS y capturar: para el caso N-1 bits TMS=0 + último TMS */
-        uint32_t last = numBits - 1u;
-        bool exit = (bool)((pTMS[last >> 3u] >> (last & 7u)) & 1u);
-
-        /* Verificar que todos los bits anteriores son TMS=0 */
-        bool simple = true;
+        uint32_t last    = numBits - 1u;
+        bool exit_bit    = (bool)((pTMS[last >> 3u] >> (last & 7u)) & 1u);
+        bool simple      = true;
         for (uint32_t i = 0u; i < last && simple; i++) {
-            if ((pTMS[i >> 3u] >> (i & 7u)) & 1u)
-                simple = false;
+            if ((pTMS[i >> 3u] >> (i & 7u)) & 1u) simple = false;
         }
-        if (simple)
-            return jtag_shift_data(pTDI, pTDO, numBits, exit) ? 0 : -1;
-
-        /* Fallback: bit-a-bit */
-        return jtag_store_raw_bitbang(pTDI, pTDO, pTMS, numBits) ? 0 : -1;
+        ret = simple
+            ? (jtag_shift_data(pTDI, pTDO, numBits, exit_bit) ? 0 : -1)
+            : (jtag_store_raw_bitbang(pTDI, pTDO, pTMS, numBits) ? 0 : -1);
+        break;
     }
 
     case TMS_MIXED:
-        return jtag_store_raw_bitbang(pTDI, pTDO, pTMS, numBits) ? 0 : -1;
+    default:
+        ret = jtag_store_raw_bitbang(pTDI, pTDO, pTMS, numBits) ? 0 : -1;
+        break;
     }
-    return 0;
+
+    tap_track_tms(pTMS, numBits);
+    g_tap_state = tap_track_state();
+    return ret;
 }
 
 void __cdecl JLINKARM_JTAG_SyncBits(void) {
@@ -423,7 +563,7 @@ void __cdecl JLINKARM_GetFeatureString(char *pBuf) {
 }
 
 void __cdecl JLINKARM_GetOEMString(char *pBuf) {
-    if (pBuf) strcpy(pBuf, "PicoAdapter");
+    if (pBuf) strncpy_s(pBuf, 32, "PicoAdapter", _TRUNCATE);
 }
 
 /* ======================================================================
@@ -465,6 +605,10 @@ int __cdecl JLINKARM_JTAG_SetDeviceList(const JLINKARM_JTAG_DEVICE_CONF *pList,
     int count = (n > 32) ? 32 : n;
     memcpy(g_dev_list, pList, (size_t)count * sizeof(JLINKARM_JTAG_DEVICE_CONF));
     g_dev_count = count;
+    /* Calcular longitud IR total de la cadena */
+    g_total_ir_len = 0u;
+    for (int i = 0; i < count; i++)
+        g_total_ir_len += (uint32_t)g_dev_list[i].IRLen;
     return 0;
 }
 

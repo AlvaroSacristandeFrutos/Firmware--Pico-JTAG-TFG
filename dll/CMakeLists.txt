@@ -10,6 +10,7 @@ add_library(JLink_x64 SHARED
     src/pico_transport.c
     src/com_detect.c
     src/jtag_chain.c
+    src/jtag_tap_track.c
     src/jlink_api.c
     JLink_x64.def
 )

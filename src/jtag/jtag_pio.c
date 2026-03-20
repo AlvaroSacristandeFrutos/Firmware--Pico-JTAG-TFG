@@ -10,8 +10,10 @@
 #include "hardware/pio.h"
 #include "hardware/dma.h"
 #include "hardware/clocks.h"
+#include "hardware/gpio.h"
 #include "hardware/structs/sio.h"
 #include "hardware/structs/io_bank0.h"
+#include "pico/time.h"
 
 /* Valores de FUNCSEL para los pines GPIO (RP2040 datasheet, Table 5) */
 #define GPIO_FUNC_SIO   5u
@@ -32,6 +34,21 @@ static uint32_t s_freq_khz = 4000u;   /* frecuencia actual en kHz */
  * Tamaño máximo: num_bytes ≤ 1022 (CMD_BUF_SIZE/2 - 2) para hw_jtag3.
  */
 static uint32_t s_rx_words[1022];
+
+/*
+ * Recuperación tras timeout de DMA: aborta ambos canales y reinicia la SM
+ * para que el PIO quede listo para la siguiente transferencia.
+ * TCK queda en nivel bajo (side 0 del estado inicial del programa).
+ */
+static void jtag_pio_recover(void) {
+    dma_channel_abort(s_dma_tx);
+    dma_channel_abort(s_dma_rx);
+    pio_sm_set_enabled(s_pio, s_sm, false);
+    pio_sm_clear_fifos(s_pio, s_sm);
+    pio_sm_restart(s_pio, s_sm);
+    pio_sm_exec(s_pio, s_sm, pio_encode_jmp(s_offset));  /* PC → inicio del programa */
+    pio_sm_set_enabled(s_pio, s_sm, true);
+}
 
 void jtag_pio_init(void) {
     /* ---- TMS, nRST, nTRST → SIO outputs, inactivos (nivel alto) ---- */
@@ -67,12 +84,16 @@ void jtag_pio_init(void) {
 
     /*
      * Divisor de reloj para la frecuencia JTAG por defecto.
-     * Cada bit JTAG requiere 2 ciclos de PIO (TCK bajo + TCK alto).
-     *   div = clk_sys / (freq_hz * 2)
+     * El bucle PIO tiene 4 instrucciones por bit (out, nop, in, jmp), por lo que
+     * la frecuencia TCK es clk_sys / (div * 4):
+     *   div = clk_sys / (freq_hz * 4)
      */
     float div = (float)clock_get_hz(clk_sys) /
-                ((float)(4000u * 1000u) * 2.0f);  /* 4000 kHz por defecto */
-    if (div < 1.0f) div = 1.0f;
+                ((float)(4000u * 1000u) * 4.0f);  /* 4000 kHz por defecto */
+    /* div mínimo = 2: TCK máx = 125 MHz / (2×4) ≈ 15.6 MHz.
+     * div = 1 daría 31.25 MHz, por encima del límite de muchos targets ARM
+     * (Cortex-M: 25 MHz típico) y del nivel-shifter del PCB. */
+    if (div < 2.0f) div = 2.0f;
     sm_config_set_clkdiv(&c, div);
 
     /* Direcciones de los pines */
@@ -90,10 +111,18 @@ void jtag_pio_init(void) {
     pio_sm_set_enabled(s_pio, s_sm, true);
 
     /*
+     * Pull-down interno en TDO: cuando no hay target conectado o está apagado,
+     * TDO flota y el PIO leería bits aleatorios.  El pull-down fuerza nivel 0
+     * estable en ausencia de señal, evitando IDCODEs falsos en el escaneo.
+     */
+    gpio_set_pulls(PIN_TDO, false, true);
+
+    /*
      * Bypass del sincronizador de entrada de 2 ciclos en el pin TDO.
      * Elimina ~16 ns de latencia de captura a 125 MHz de clk_sys.
-     * Es seguro porque TDO en JTAG está síncrono con TCK y ya se ha
-     * estabilizado cuando el PIO lo muestrea (flanco descendente de TCK).
+     * Es seguro porque TDO en JTAG se estabiliza tras el flanco descendente
+     * de TCK y permanece válido durante todo el período TCK alto, que es
+     * cuando el PIO ejecuta la instrucción 'in pins, 1 side 1'.
      * Técnica adoptada de pico-dirtyJtag (BOARD_PICO, mismo pinout).
      */
     hw_set_bits(&s_pio->input_sync_bypass, 1u << PIN_TDO);
@@ -107,8 +136,8 @@ void jtag_set_freq(uint32_t freq_khz) {
     if (freq_khz == 0u) freq_khz = 1u;
     s_freq_khz = freq_khz;
     float div = (float)clock_get_hz(clk_sys) /
-                ((float)freq_khz * 1000.0f * 2.0f);
-    if (div < 1.0f) div = 1.0f;
+                ((float)freq_khz * 1000.0f * 4.0f);
+    if (div < 2.0f) div = 2.0f;
     pio_sm_set_clkdiv(s_pio, s_sm, div);
 }
 
@@ -116,11 +145,16 @@ uint32_t jtag_get_freq(void) {
     return s_freq_khz;
 }
 
-void jtag_pio_write_read(const uint8_t *tdi_buf, uint8_t *tdo_buf,
+bool jtag_pio_write_read(const uint8_t *tdi_buf, uint8_t *tdo_buf,
                          uint32_t len_bits) {
-    if (len_bits == 0u) return;
+    if (len_bits == 0u) return true;
 
     uint32_t num_bytes = (len_bits + 7u) / 8u;
+
+    /* Guardia: el buffer DMA s_rx_words tiene 1022 posiciones (u32).
+     * Una transferencia mayor desborda el buffer → rechazar. */
+    if (num_bytes > (uint32_t)(sizeof(s_rx_words) / sizeof(s_rx_words[0])))
+        return false;
 
     /*
      * Vaciar bytes residuales del RX FIFO.
@@ -165,9 +199,27 @@ void jtag_pio_write_read(const uint8_t *tdi_buf, uint8_t *tdo_buf,
     dma_channel_configure(s_dma_rx, &rx_cfg,
         s_rx_words, &s_pio->rxf[s_sm], num_bytes, true);
 
-    /* Esperar a que ambos DMA terminen */
-    dma_channel_wait_for_finish_blocking(s_dma_tx);
-    dma_channel_wait_for_finish_blocking(s_dma_rx);
+    /*
+     * Esperar a que el DMA RX termine con timeout calculado.
+     * Tiempo esperado = bits / freq_hz; margen 3× + 100 ms fijo para latencias
+     * de arranque.  Si el target deja de responder (reset, corte de alimentación)
+     * el DMA nunca completa → la SM PIO hace stall en 'out' esperando DREQ.
+     * En ese caso abortamos y reiniciamos el PIO para no bloquear Core 1.
+     *
+     * El DMA TX termina siempre antes que el RX (el FIFO absorbe los datos),
+     * por lo que basta supervisar el RX.
+     */
+    uint64_t expected_us = ((uint64_t)len_bits * 1000u) / s_freq_khz;
+    uint64_t timeout_us  = expected_us * 3u + 100000u;   /* 3× margen + 100 ms */
+    uint64_t deadline    = time_us_64() + timeout_us;
+
+    while (dma_channel_is_busy(s_dma_rx)) {
+        if (time_us_64() >= deadline) {
+            jtag_pio_recover();
+            return false;
+        }
+    }
+    dma_channel_wait_for_finish_blocking(s_dma_tx);   /* ya casi terminado */
 
     /* Extraer bytes de los bits [31:24] de cada word */
     for (uint32_t i = 0u; i < num_bytes; i++)
@@ -181,20 +233,22 @@ void jtag_pio_write_read(const uint8_t *tdi_buf, uint8_t *tdo_buf,
     uint32_t rem = len_bits & 7u;
     if (rem != 0u)
         tdo_buf[num_bytes - 1u] >>= (8u - rem);
+
+    return true;
 }
 
-void jtag_pio_write_read_exit(const uint8_t *tdi_buf, uint8_t *tdo_buf,
+bool jtag_pio_write_read_exit(const uint8_t *tdi_buf, uint8_t *tdo_buf,
                                uint32_t len_bits, bool exit_shift) {
-    if (len_bits == 0u) return;
+    if (len_bits == 0u) return true;
 
-    if (!exit_shift) {
-        jtag_pio_write_read(tdi_buf, tdo_buf, len_bits);
-        return;
-    }
+    if (!exit_shift)
+        return jtag_pio_write_read(tdi_buf, tdo_buf, len_bits);
 
     /* Shift bits 0..len_bits-2 with TMS=0 (current state). */
-    if (len_bits > 1u)
-        jtag_pio_write_read(tdi_buf, tdo_buf, len_bits - 1u);
+    if (len_bits > 1u) {
+        if (!jtag_pio_write_read(tdi_buf, tdo_buf, len_bits - 1u))
+            return false;
+    }
 
     /* Raise TMS=1 so the TAP will transition to Exit1 on the next TCK edge. */
     sio_hw->gpio_set = (1u << PIN_TMS);
@@ -203,26 +257,25 @@ void jtag_pio_write_read_exit(const uint8_t *tdi_buf, uint8_t *tdo_buf,
     uint32_t last_idx  = len_bits - 1u;
     uint8_t  tdi_last  = (tdi_buf[last_idx >> 3u] >> (last_idx & 7u)) & 1u;
     uint8_t  tdo_last  = 0u;
-    jtag_pio_write_read(&tdi_last, &tdo_last, 1u);
-    /* tdo_last is 0 or 1 after the 1-bit correction inside jtag_pio_write_read. */
+    if (!jtag_pio_write_read(&tdi_last, &tdo_last, 1u))
+        return false;
 
     /* Insert last TDO bit into tdo_buf at the correct bit position. */
-    uint32_t byte_idx       = last_idx >> 3u;
-    uint8_t  bit_pos        = (uint8_t)(last_idx & 7u);
+    uint32_t byte_idx         = last_idx >> 3u;
+    uint8_t  bit_pos          = (uint8_t)(last_idx & 7u);
     uint32_t first_call_bytes = (len_bits > 1u) ? ((len_bits - 1u + 7u) / 8u) : 0u;
 
     if (byte_idx >= first_call_bytes) {
-        /* New byte not written by the first call — initialise clean. */
         tdo_buf[byte_idx] = tdo_last & 1u;
     } else {
-        /* Byte was partially filled by the first call — merge the bit. */
         tdo_buf[byte_idx] &= ~(uint8_t)(1u << bit_pos);
         if (tdo_last & 1u)
             tdo_buf[byte_idx] |= (uint8_t)(1u << bit_pos);
     }
+    return true;
 }
 
-void jtag_pio_write(const uint8_t *tdi_buf, uint32_t len_bits) {
+bool jtag_pio_write(const uint8_t *tdi_buf, uint32_t len_bits) {
     static uint8_t tdo_discard[64];   /* 512 bits por iteración como máximo */
 
     while (len_bits > 0u) {
@@ -234,8 +287,10 @@ void jtag_pio_write(const uint8_t *tdi_buf, uint32_t len_bits) {
             chunk_bits  = chunk_bytes * 8u;
         }
 
-        jtag_pio_write_read(tdi_buf, tdo_discard, chunk_bits);
+        if (!jtag_pio_write_read(tdi_buf, tdo_discard, chunk_bits))
+            return false;
         tdi_buf  += chunk_bytes;
         len_bits -= chunk_bits;
     }
+    return true;
 }

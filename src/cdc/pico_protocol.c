@@ -104,28 +104,17 @@ static uint8_t crc8_block(const uint8_t *data, size_t len) {
 /*  Funciones de respuesta                                                 */
 /* ---------------------------------------------------------------------- */
 
-static void send_resp_ok(void) {
-    uint8_t frame[5];
-    frame[0] = PROTO_START;
-    frame[1] = RESP_OK;
-    frame[2] = 0x00u;
-    frame[3] = 0x00u;
+static void send_resp_simple(uint8_t code, bool is_error) {
+    led_red_set(is_error);
+    uint8_t frame[5] = {PROTO_START, code, 0x00u, 0x00u, 0x00u};
     frame[4] = crc8_block(frame, 4u);
     cdc_send(frame, 5u);
 }
-
-static void send_resp_error(void) {
-    led_red_set(true);   /* encender LED rojo: error de protocolo */
-    uint8_t frame[5];
-    frame[0] = PROTO_START;
-    frame[1] = RESP_ERROR;
-    frame[2] = 0x00u;
-    frame[3] = 0x00u;
-    frame[4] = crc8_block(frame, 4u);
-    cdc_send(frame, 5u);
-}
+#define send_resp_ok()    send_resp_simple(RESP_OK,    false)
+#define send_resp_error() send_resp_simple(RESP_ERROR, true)
 
 static void send_resp_data(const uint8_t *data, uint16_t len) {
+    led_red_set(false);
     s_tx_frame[0] = PROTO_START;
     s_tx_frame[1] = RESP_DATA;
     s_tx_frame[2] = (uint8_t)(len & 0xFFu);
@@ -160,7 +149,7 @@ static void handle_set_clock(const uint8_t *payload, uint16_t len) {
 }
 
 /*
- * CMD_WRITE_TMS — payload: [numBits:u8][tmsBytes: ceil(numBits/8)]
+ * CMD_WRITE_TMS — payload: [numBits:u16 LE][tmsBytes: ceil(numBits/8)]
  *
  * Para cada bit i:
  *   1. Extraer el bit i del array tmsBytes y fijar TMS con jtag_tap_set_tms()
@@ -212,7 +201,10 @@ static void handle_write_tms(const uint8_t *payload, uint16_t len) {
         }
 
         /* Generar 'run' pulsos TCK en una sola operación DMA */
-        jtag_pio_write(k_zeros, (uint32_t)run);
+        if (!jtag_pio_write(k_zeros, (uint32_t)run)) {
+            send_resp_error();
+            return;
+        }
         i = (uint16_t)(i + run);
     }
     send_resp_ok();
@@ -221,9 +213,8 @@ static void handle_write_tms(const uint8_t *payload, uint16_t len) {
 /*
  * CMD_SHIFT_DATA — payload: [numBits:u32 LE][exitShift:u8][tdi: ceil(numBits/8)]
  *
- * exitShift se ignora (el PC gestiona la salida de Shift-DR con CMD_WRITE_TMS).
- * Llama a jtag_pio_write_read() para transferencia bidireccional y responde
- * RESP_DATA con los bytes TDO capturados.
+ * exitShift: 0=permanecer en Shift, 1=salir a Exit1 (último bit con TMS=1).
+ * Responde RESP_DATA con los bytes TDO capturados.
  */
 static void handle_shift_data(const uint8_t *payload, uint16_t len) {
     if (len < 5u) {
@@ -245,7 +236,14 @@ static void handle_shift_data(const uint8_t *payload, uint16_t len) {
     }
     const uint8_t *tdi = payload + 5u;
 
-    jtag_pio_write_read_exit(tdi, s_tdo_buf, num_bits, exit_shift);
+    led_toggle();   /* parpadeo verde: inicio transferencia */
+    bool ok = jtag_pio_write_read_exit(tdi, s_tdo_buf, num_bits, exit_shift);
+    led_toggle();   /* parpadeo verde: fin transferencia */
+
+    if (!ok) {
+        send_resp_error();
+        return;
+    }
     send_resp_data(s_tdo_buf, (uint16_t)num_bytes);
 }
 
@@ -404,9 +402,8 @@ static void handle_uart_send(const uint8_t *payload, uint16_t len) {
  * RESP_DATA con 0 bytes es válido (buffer vacío).
  */
 static void handle_uart_recv(void) {
-    static uint8_t tmp[512];
-    uint16_t got = uart_driver_recv(tmp, (uint16_t)sizeof(tmp));
-    send_resp_data(tmp, got);
+    uint16_t got = uart_driver_recv(s_payload, 512u);
+    send_resp_data(s_payload, got);
 }
 
 /*
@@ -426,7 +423,6 @@ static void handle_set_led(const uint8_t *payload, uint16_t len) {
 /* ---------------------------------------------------------------------- */
 
 static void dispatch(void) {
-    led_red_set(false);   /* apagar LED rojo: trama válida recibida */
     switch (s_cmd) {
     case CMD_PING:
         handle_ping();
@@ -514,12 +510,13 @@ void protocol_feed(uint8_t byte) {
     case ST_WAIT_LEN_HI:
         s_len    |= (uint16_t)((uint16_t)byte << 8u);
         s_crc_acc = crc8_byte(s_crc_acc, byte);
-        s_recv    = 0u;
-        if (s_len == 0u) {
-            s_state = ST_RECV_CRC;
-        } else {
-            s_state = ST_RECV_PAYLOAD;
+        if (s_len > (uint16_t)MAX_PAYLOAD) {
+            send_resp_error();       /* fallo rápido: payload demasiado grande */
+            s_state = ST_WAIT_START;
+            break;
         }
+        s_recv  = 0u;
+        s_state = (s_len == 0u) ? ST_RECV_CRC : ST_RECV_PAYLOAD;
         break;
 
     case ST_RECV_PAYLOAD:
@@ -533,10 +530,9 @@ void protocol_feed(uint8_t byte) {
         break;
 
     case ST_RECV_CRC:
-        if (byte == s_crc_acc && s_len <= (uint16_t)MAX_PAYLOAD) {
+        if (byte == s_crc_acc)
             dispatch();
-        }
-        /* Si CRC incorrecto o payload demasiado grande: descartar silenciosamente */
+        /* Si CRC incorrecto: descartar silenciosamente (s_len ya validado en ST_WAIT_LEN_HI) */
         s_state = ST_WAIT_START;
         break;
     }

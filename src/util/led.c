@@ -3,13 +3,9 @@
 
 #include "hardware/structs/sio.h"
 
-#define LED_MASK     (1u << PIN_LED)
-#define LED_RED_MASK (1u << PIN_LED_RED)
-
-void led_init(void) {
-    /* GP14 y GP15 ya configurados como SIO outputs en gpio_init_all(). */
-    sio_hw->gpio_clr = LED_MASK | LED_RED_MASK;
-}
+#define LED_MASK      (1u << PIN_LED)
+#define LED_RED_MASK  (1u << PIN_LED_RED)
+#define LED_OB_MASK   (1u << PIN_LED_ONBOARD)
 
 void led_set(bool on) {
     if (on) sio_hw->gpio_set = LED_MASK;
@@ -27,4 +23,8 @@ void led_red_set(bool on) {
 
 void led_red_toggle(void) {
     sio_hw->gpio_togl = LED_RED_MASK;
+}
+
+void led_onboard_toggle(void) {
+    sio_hw->gpio_togl = LED_OB_MASK;
 }

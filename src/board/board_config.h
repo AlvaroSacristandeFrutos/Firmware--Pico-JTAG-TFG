@@ -32,31 +32,13 @@
 #define PIN_UART_RX     13
 
 /* ---- LEDs externos del PCB (activos a nivel alto) ---- */
-#define PIN_LED         14   /* GP14 — LED verde (estado general) */
-#define PIN_LED_RED     15   /* GP15 — LED rojo (error / actividad JTAG) */
-#define PIN_LED_ONBOARD 25   /* GP25 — LED onboard de la Pico (depuración) */
+#define PIN_LED         14   /* GP14 — LED verde (actividad JTAG / USB) */
+#define PIN_LED_RED     15   /* GP15 — LED rojo  (error de protocolo) */
+#define PIN_LED_ONBOARD 25   /* GP25 — LED onboard de la Pico (actividad UART) */
 
 /* ---- Lectura analógica de tensión ---- */
 #define PIN_VREF_ADC    26   /* GP26 / ADC0 — tensión de referencia del objetivo / 2 */
 #define ADC_CHANNEL     0
-
-/* ---- Máscaras de conveniencia para operaciones sobre varios pines ---- */
-#define JTAG_PIN_MASK   ((1u << PIN_TDI) | (1u << PIN_TDO) | \
-                         (1u << PIN_TCK) | (1u << PIN_TMS))
-#define RST_PIN_MASK    ((1u << PIN_RST) | (1u << PIN_TRST))
-
-/* ---- Frecuencias de reloj del sistema (Hz) ---- */
-/* El SDK de Pico define estas macros en platform_defs.h.
- * Las guardamos con #ifndef para evitar advertencias de redefinición. */
-#ifndef SYS_CLK_HZ
-#define SYS_CLK_HZ     125000000u
-#endif
-#ifndef USB_CLK_HZ
-#define USB_CLK_HZ      48000000u
-#endif
-#ifndef XOSC_HZ
-#define XOSC_HZ         12000000u
-#endif
 
 /* ---- Acceso atómico a registros del RP2040 ---- */
 /*
@@ -70,14 +52,6 @@
  *   addr | 0x2000 → SET
  *   addr | 0x3000 → CLEAR
  */
-static inline void hw_set_bits_raw(volatile uint32_t *addr, uint32_t mask) {
-    *(volatile uint32_t *)((uintptr_t)addr | 0x2000u) = mask;
-}
-
 static inline void hw_clear_bits_raw(volatile uint32_t *addr, uint32_t mask) {
     *(volatile uint32_t *)((uintptr_t)addr | 0x3000u) = mask;
-}
-
-static inline void hw_xor_bits_raw(volatile uint32_t *addr, uint32_t mask) {
-    *(volatile uint32_t *)((uintptr_t)addr | 0x1000u) = mask;
 }

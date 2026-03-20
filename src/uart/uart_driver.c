@@ -10,6 +10,7 @@
 
 #include "uart_driver.h"
 #include "board/board_config.h"
+#include "util/led.h"
 
 #include "hardware/uart.h"
 #include "hardware/gpio.h"
@@ -21,6 +22,9 @@
 
 #define UART_RX_BUF_SIZE  512u
 #define UART_RX_BUF_MASK  (UART_RX_BUF_SIZE - 1u)
+
+_Static_assert((UART_RX_BUF_SIZE & (UART_RX_BUF_SIZE - 1u)) == 0u,
+               "UART_RX_BUF_SIZE debe ser potencia de 2");
 
 static uint8_t           s_rx_buf[UART_RX_BUF_SIZE];
 static volatile uint16_t s_rx_head = 0u;   /* escrito por ISR  */
@@ -60,6 +64,7 @@ void uart_driver_set_baud(uint32_t baud_hz) {
 }
 
 void uart_driver_send(const uint8_t *data, uint16_t len) {
+    if (len > 0u) led_onboard_toggle();
     for (uint16_t i = 0u; i < len; i++)
         uart_putc_raw(uart0, data[i]);
 }
@@ -70,5 +75,6 @@ uint16_t uart_driver_recv(uint8_t *buf, uint16_t max_len) {
         buf[count++] = s_rx_buf[s_rx_tail];
         s_rx_tail = (s_rx_tail + 1u) & UART_RX_BUF_MASK;
     }
+    if (count > 0u) led_onboard_toggle();
     return count;
 }

@@ -10,52 +10,33 @@
 #include "pico/types.h"
 #include "hardware/structs/usb.h"
 
-/* bmRequestType bit definitions */
-#define USB_REQ_TYPE_STANDARD           0x00u
-#define USB_REQ_TYPE_TYPE_MASK          0x60u
+/* bmRequestType */
 #define USB_REQ_TYPE_TYPE_CLASS         0x20u
 #define USB_REQ_TYPE_TYPE_VENDOR        0x40u
-
 #define USB_REQ_TYPE_RECIPIENT_MASK     0x1fu
-#define USB_REQ_TYPE_RECIPIENT_DEVICE   0x00u
-#define USB_REQ_TYPE_RECIPIENT_INTERFACE 0x01u
 #define USB_REQ_TYPE_RECIPIENT_ENDPOINT 0x02u
+#define USB_DIR_OUT                     0x00u
+#define USB_DIR_IN                      0x80u
 
-#define USB_DIR_OUT 0x00u
-#define USB_DIR_IN  0x80u
-
-/* Transfer types */
+/* Transfer types (bmAttributes) */
 #define USB_TRANSFER_TYPE_CONTROL       0x0
-#define USB_TRANSFER_TYPE_ISOCHRONOUS   0x1
 #define USB_TRANSFER_TYPE_BULK          0x2
 #define USB_TRANSFER_TYPE_INTERRUPT     0x3
-#define USB_TRANSFER_TYPE_BITS          0x3
 
 /* Descriptor types */
-#define USB_DT_DEVICE       0x01
-#define USB_DT_CONFIG       0x02
-#define USB_DT_STRING       0x03
-#define USB_DT_INTERFACE    0x04
-#define USB_DT_ENDPOINT     0x05
-#define USB_DT_BOS          0x0F
+#define USB_DT_DEVICE                   0x01
+#define USB_DT_CONFIG                   0x02
+#define USB_DT_STRING                   0x03
+#define USB_DT_ENDPOINT                 0x05
 
 /* Standard request codes */
-#define USB_REQUEST_GET_STATUS          0x00
 #define USB_REQUEST_CLEAR_FEATURE       0x01
-#define USB_REQUEST_SET_FEATURE         0x03
 #define USB_REQUEST_SET_ADDRESS         0x05
 #define USB_REQUEST_GET_DESCRIPTOR      0x06
-#define USB_REQUEST_SET_DESCRIPTOR      0x07
-#define USB_REQUEST_GET_CONFIGURATION   0x08
 #define USB_REQUEST_SET_CONFIGURATION   0x09
-#define USB_REQUEST_GET_INTERFACE       0x0a
-#define USB_REQUEST_SET_INTERFACE       0x0b
-#define USB_REQUEST_SYNC_FRAME          0x0c
 
 /* Feature selectors */
 #define USB_FEAT_ENDPOINT_HALT          0x00
-#define USB_FEAT_DEVICE_REMOTE_WAKEUP   0x01
-#define USB_FEAT_TEST_MODE              0x02
 
 /* ---- Packed descriptor structs ---- */
 
@@ -66,11 +47,6 @@ struct usb_setup_packet {
     uint16_t wIndex;
     uint16_t wLength;
 } __packed;
-
-struct usb_descriptor {
-    uint8_t bLength;
-    uint8_t bDescriptorType;
-};
 
 struct usb_device_descriptor {
     uint8_t  bLength;
@@ -87,29 +63,6 @@ struct usb_device_descriptor {
     uint8_t  iProduct;
     uint8_t  iSerialNumber;
     uint8_t  bNumConfigurations;
-} __packed;
-
-struct usb_configuration_descriptor {
-    uint8_t  bLength;
-    uint8_t  bDescriptorType;
-    uint16_t wTotalLength;
-    uint8_t  bNumInterfaces;
-    uint8_t  bConfigurationValue;
-    uint8_t  iConfiguration;
-    uint8_t  bmAttributes;
-    uint8_t  bMaxPower;
-} __packed;
-
-struct usb_interface_descriptor {
-    uint8_t bLength;
-    uint8_t bDescriptorType;
-    uint8_t bInterfaceNumber;
-    uint8_t bAlternateSetting;
-    uint8_t bNumEndpoints;
-    uint8_t bInterfaceClass;
-    uint8_t bInterfaceSubClass;
-    uint8_t bInterfaceProtocol;
-    uint8_t iInterface;
 } __packed;
 
 struct usb_endpoint_descriptor {

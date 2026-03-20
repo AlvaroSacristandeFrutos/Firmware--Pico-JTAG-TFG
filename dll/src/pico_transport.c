@@ -30,7 +30,7 @@ static uint8_t crc8_buf(const uint8_t *buf, size_t n) {
 
 HANDLE pico_port_open(const char *port_name) {
     /* Los puertos > COM9 requieren el prefijo \\.\ */
-    char path[32];
+    char path[64];
     _snprintf_s(path, sizeof(path), _TRUNCATE, "\\\\.\\%s", port_name);
 
     HANDLE h = CreateFileA(path,
@@ -102,14 +102,9 @@ bool pico_send(HANDLE h, uint8_t cmd, const uint8_t *payload, uint16_t len) {
         (uint8_t)(len >> 8u)
     };
 
-    /* CRC sobre cabecera + payload */
+    /* CRC acumulativo: cabecera primero, luego payload byte a byte */
     uint8_t crc = crc8_buf(hdr, 4u);
-    if (len > 0u && payload)
-        crc = crc8_buf(payload, len); /* acumular sobre el payload */
-
-    /* Recalcular correctamente: CRC debe ser acumulativo sobre todos los bytes */
-    crc = crc8_buf(hdr, 4u);
-    for (uint16_t i = 0; i < len && payload; i++)
+    for (uint16_t i = 0u; i < len && payload; i++)
         crc = crc8_update(crc, payload[i]);
 
     DWORD written;

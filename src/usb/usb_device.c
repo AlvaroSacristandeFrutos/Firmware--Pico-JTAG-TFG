@@ -16,7 +16,7 @@
 #include "usb_device.h"
 #include "usb_common.h"
 #include "usb_descriptors.h"
-#include "cdc_uart.h"
+#include "cdc/cdc_rx.h"
 
 #include <string.h>
 #include "hardware/regs/usb.h"
@@ -32,11 +32,9 @@
 /*  Estado interno del controlador                                         */
 /* ---------------------------------------------------------------------- */
 
-static bool     should_set_address = false;
-static uint8_t  dev_addr = 0;
+static uint8_t  s_pending_addr = 0;   /* 0 = sin pendiente, >0 = dirección a aplicar */
 
 static volatile bool configured = false;
-static volatile bool enumerated = false;
 
 /*
  * Buffer para transferencias EP0 IN multi-paquete.
@@ -69,7 +67,7 @@ static inline bool ep_is_tx(struct usb_endpoint_configuration *ep) {
 
 struct usb_endpoint_configuration *usb_get_endpoint_configuration(uint8_t addr) {
     struct usb_endpoint_configuration *endpoints = dev_config.endpoints;
-    for (int i = 0; i < USB_NUM_ENDPOINTS; i++) {
+    for (int i = 0; i < 5; i++) {
         if (endpoints[i].descriptor &&
             endpoints[i].descriptor->bEndpointAddress == addr) {
             return &endpoints[i];
@@ -90,7 +88,7 @@ static void usb_setup_endpoint(const struct usb_endpoint_configuration *ep) {
 
 static void usb_setup_endpoints(void) {
     const struct usb_endpoint_configuration *endpoints = dev_config.endpoints;
-    for (int i = 0; i < USB_NUM_ENDPOINTS; i++) {
+    for (int i = 0; i < 5; i++) {
         if (endpoints[i].descriptor && endpoints[i].handler) {
             usb_setup_endpoint(&endpoints[i]);
         }
@@ -205,14 +203,13 @@ static void usb_stall_ep0_in(void) {
 }
 
 static void usb_set_device_address(volatile struct usb_setup_packet *pkt) {
-    dev_addr = (uint8_t)(pkt->wValue & 0xff);
-    should_set_address = true;
+    s_pending_addr = (uint8_t)(pkt->wValue & 0xff);
     usb_acknowledge_out_request();
 }
 
 static void usb_reset_endpoint_pids(void) {
     struct usb_endpoint_configuration *endpoints = dev_config.endpoints;
-    for (int i = 0; i < USB_NUM_ENDPOINTS; i++) {
+    for (int i = 0; i < 5; i++) {
         if (endpoints[i].descriptor)
             endpoints[i].next_pid = 0;
     }
@@ -305,7 +302,7 @@ static void usb_handle_ep_buff_done(struct usb_endpoint_configuration *ep) {
 
 static void usb_handle_buff_done(uint ep_num, bool in) {
     uint8_t ep_addr = ep_num | (in ? USB_DIR_IN : 0);
-    for (uint i = 0; i < USB_NUM_ENDPOINTS; i++) {
+    for (uint i = 0; i < 5; i++) {
         struct usb_endpoint_configuration *ep = &dev_config.endpoints[i];
         if (ep->descriptor && ep->handler) {
             if (ep->descriptor->bEndpointAddress == ep_addr) {
@@ -319,7 +316,7 @@ static void usb_handle_buff_done(uint ep_num, bool in) {
 static void usb_handle_buff_status(uint32_t buffers) {
     uint32_t remaining = buffers;
     uint32_t bit = 1u;
-    for (uint i = 0; remaining && i < USB_NUM_ENDPOINTS * 2; i++) {
+    for (uint i = 0; remaining && i < 5 * 2; i++) {
         if (remaining & bit) {
             usb_hw_clear->buf_status = bit;
             usb_handle_buff_done(i >> 1u, !(i & 1u));
@@ -336,9 +333,7 @@ static void usb_handle_buff_status(uint32_t buffers) {
 static volatile uint32_t bus_reset_count = 0;
 
 static void usb_bus_reset(void) {
-    bus_reset_count++;
-    dev_addr = 0;
-    should_set_address = false;
+    s_pending_addr = 0;
     usb_hw->dev_addr_ctrl = 0;
     configured = false;
 
@@ -357,14 +352,10 @@ static void usb_bus_reset(void) {
         usb_get_endpoint_configuration(CDC_EP_DATA_IN);
     if (ep_cdc_in) *ep_cdc_in->buffer_control = 0;
 
-    for (int i = 0; i < USB_NUM_ENDPOINTS; i++) {
+    for (int i = 0; i < 5; i++) {
         if (dev_config.endpoints[i].descriptor)
             dev_config.endpoints[i].next_pid = 0;
     }
-}
-
-uint32_t usb_get_bus_reset_count(void) {
-    return bus_reset_count;
 }
 
 /* ---------------------------------------------------------------------- */
@@ -374,10 +365,9 @@ uint32_t usb_get_bus_reset_count(void) {
 void ep0_in_handler(uint8_t *buf, uint16_t len) {
     (void)buf; (void)len;
 
-    if (should_set_address) {
-        usb_hw->dev_addr_ctrl = dev_addr;
-        should_set_address    = false;
-        enumerated            = true;
+    if (s_pending_addr) {
+        usb_hw->dev_addr_ctrl = s_pending_addr;
+        s_pending_addr        = 0;
         ep0_pending_total     = 0;
         ep0_pending_sent      = 0;
         return;
@@ -510,15 +500,7 @@ void usb_device_init(void) {
     usb_hw_set->sie_ctrl = USB_SIE_CTRL_PULLUP_EN_BITS;
 }
 
-void usb_device_task(void) {
-    /* Todos los eventos USB se gestionan en isr_usbctrl() */
-}
-
 bool usb_is_configured(void) {
     return configured;
-}
-
-bool usb_is_enumerated(void) {
-    return enumerated;
 }
 

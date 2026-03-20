@@ -10,6 +10,7 @@
 #include <windows.h>
 #include <stdio.h>
 #include "jlink_types.h"
+#include "jtag_tap_track.h"
 
 extern HANDLE   g_hCOM;           /* INVALID_HANDLE_VALUE si cerrado */
 extern int      g_is_open;
@@ -20,9 +21,13 @@ extern int      g_reset_type;     /* 0=NORMAL (único soportado) */
 extern int      g_jtag_ir_len;    /* IR length total de la cadena */
 extern int      g_jtag_dev_pos;   /* posición del dispositivo en la cadena */
 
-/* Cadena scan (guardada por SetDeviceList) */
+/* Cadena scan (guardada por SetDeviceList / jtag_scan_chain) */
 extern JLINKARM_JTAG_DEVICE_CONF g_dev_list[32];
 extern int                        g_dev_count;
+extern uint32_t                   g_total_ir_len;  /* suma de IRLen de todos los dispositivos */
+
+/* Estado TAP rastreado por la DLL (se actualiza en cada StoreRaw/StoreGetRaw) */
+extern tap_state_t g_tap_state;
 
 /* Logging */
 extern JLINKARM_LOG_FUNC *g_warn_cb;

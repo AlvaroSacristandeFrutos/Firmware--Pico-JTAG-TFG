@@ -11,13 +11,12 @@ pico_sdk_init()
 
 add_executable(jlink_pico_probe
     src/main.c
-    src/board/clock_init.c
     src/board/gpio_init.c
     src/usb/usb_device.c
     src/usb/usb_descriptors.c
     src/jtag/jtag_pio.c
     src/jtag/jtag_tap.c
-    src/cdc/cdc_uart.c
+    src/cdc/cdc_rx.c
     src/cdc/pico_protocol.c
     src/uart/uart_driver.c
     src/util/led.c

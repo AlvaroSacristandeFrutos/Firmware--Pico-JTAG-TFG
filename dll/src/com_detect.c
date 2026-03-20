@@ -110,7 +110,7 @@ static bool find_port_by_hwid(const char *hwid_prefix,
 
 static bool try_port_overlapped(const char *port_name,
                                 char *out_port, size_t out_size) {
-    char path[32];
+    char path[64];
     _snprintf_s(path, sizeof(path), _TRUNCATE, "\\\\.\\%s", port_name);
 
     HANDLE h = CreateFileA(path,

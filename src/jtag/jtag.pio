@@ -21,26 +21,10 @@
 loop:
     out pins, 1         side 0      ; Sacar el bit de TDI, TCK bajo
     nop                 side 1      ; TCK alto — el objetivo captura TDI
-    in  pins, 1         side 1      ; Muestrear TDO en el flanco de subida
+    in  pins, 1         side 1      ; Muestrear TDO durante TCK alto (estable desde el flanco descendente anterior)
     jmp x-- loop        side 0      ; Decrementar contador y repetir
 
     push                side 0      ; Empujar los bits TDO restantes al RX FIFO
-
-% c-sdk {
-static inline pio_sm_config jtag_xfer_program_get_default_config(uint offset) {
-    pio_sm_config c = pio_get_default_sm_config();
-    /*
-     * El programa tiene 8 instrucciones (offsets 0-7):
-     *   0: pull, 1: mov, 2: pull, 3: out, 4: nop, 5: in, 6: jmp, 7: push
-     * El wrap lleva de la instrucción 7 (push) de vuelta a la 0 (pull),
-     * de modo que transferencias encadenadas no necesitan reiniciar la SM.
-     * NOTA: offset+4 era incorrecto — con ese valor el bucle de bits nunca
-     * ejecutaba las instrucciones 'in' ni 'jmp x--'.
-     */
-    sm_config_set_wrap(&c, offset, offset + 7);
-    sm_config_set_sideset(&c, 2, true, false);  /* 1 bit de sideset, opcional */
-    sm_config_set_out_shift(&c, true, true, 8); /* desplazamiento a la derecha, autopull a 8 bits */
-    sm_config_set_in_shift(&c, true, true, 8);  /* desplazamiento a la derecha, autopush a 8 bits */
-    return c;
-}
-%}
+; Nota: jtag_xfer_program_get_default_config() la genera pioasm automáticamente.
+; La configuración completa (out_shift, in_shift, sideset_pins, etc.) se aplica
+; en jtag_pio_init() usando sm_config_set_* directamente.

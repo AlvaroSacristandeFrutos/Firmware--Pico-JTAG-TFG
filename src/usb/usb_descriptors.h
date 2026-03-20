@@ -40,8 +40,8 @@ struct usb_device_configuration {
     const unsigned char  *lang_descriptor;
     const unsigned char **descriptor_strings;
 
-    /* USB_NUM_ENDPOINTS = 16 (from SDK) */
-    struct usb_endpoint_configuration endpoints[USB_NUM_ENDPOINTS];
+    /* EP0 OUT, EP0 IN, EP1 IN (notify), EP3 OUT, EP3 IN */
+    struct usb_endpoint_configuration endpoints[5];
 };
 
 /* ---- Endpoint addresses ---- */

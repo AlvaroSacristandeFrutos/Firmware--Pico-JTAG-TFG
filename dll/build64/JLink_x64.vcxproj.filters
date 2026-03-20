@@ -10,6 +10,9 @@
     <ClCompile Include="C:\Proyecto\jlink-pico-probe\dll\src\jtag_chain.c">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="C:\Proyecto\jlink-pico-probe\dll\src\jtag_tap_track.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="C:\Proyecto\jlink-pico-probe\dll\src\jlink_api.c">
       <Filter>Source Files</Filter>
     </ClCompile>
