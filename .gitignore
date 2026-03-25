@@ -8,3 +8,6 @@ out/
 
 # Node.js
 node_modules/
+
+# Tests locales (no se suben al repositorio)
+test/
