@@ -64,10 +64,9 @@ void jtag_tap_shift_ir(const uint8_t *ir_data, uint32_t ir_len) {
     tms_set(true);  pulse_tck(2);   /* Select-DR-Scan, Select-IR-Scan */
     tms_set(false); pulse_tck(2);   /* Capture-IR, Shift-IR           */
 
-    /* Desplazar los primeros ir_len-1 bits con TMS=0 */
+    /* Desplazar los primeros ir_len-1 bits con TMS=0 (TDO se descarta) */
     if (ir_len > 1u) {
-        static uint8_t tdo_dummy[128];
-        jtag_pio_write_read(ir_data, tdo_dummy, ir_len - 1u);
+        jtag_pio_write(ir_data, ir_len - 1u);
     }
 
     /* Último bit con TMS=1 → Exit1-IR */
@@ -90,9 +89,12 @@ void jtag_tap_shift_dr(const uint8_t *tdi_data, uint8_t *tdo_data,
     tms_set(true);  pulse_tck(1);   /* Select-DR-Scan */
     tms_set(false); pulse_tck(2);   /* Capture-DR, Shift-DR */
 
-    /* Desplazar los primeros dr_len-1 bits con TMS=0, capturando TDO */
+    /* Desplazar los primeros dr_len-1 bits con TMS=0, capturando TDO si hay buffer */
     if (dr_len > 1u) {
-        jtag_pio_write_read(tdi_data, tdo_data, dr_len - 1u);
+        if (tdo_data)
+            jtag_pio_write_read(tdi_data, tdo_data, dr_len - 1u);
+        else
+            jtag_pio_write(tdi_data, dr_len - 1u);
     }
 
     /* Último bit con TMS=1 → Exit1-DR */
@@ -103,11 +105,17 @@ void jtag_tap_shift_dr(const uint8_t *tdi_data, uint8_t *tdo_data,
 
     /* Almacenar el último bit TDO en tdo_data si se proporcionó buffer */
     if (tdo_data) {
-        uint32_t last_byte = (dr_len - 1u) / 8u;
-        uint32_t last_bit  = (dr_len - 1u) & 7u;
-        tdo_data[last_byte] = (uint8_t)(
-            (tdo_data[last_byte] & ~(uint8_t)(1u << last_bit)) |
-            ((tdo_last & 1u) << last_bit));
+        uint32_t last_byte        = (dr_len - 1u) / 8u;
+        uint32_t last_bit         = (dr_len - 1u) & 7u;
+        uint32_t first_call_bytes = (dr_len > 1u) ? ((dr_len - 1u + 7u) / 8u) : 0u;
+        if (last_byte >= first_call_bytes) {
+            /* Byte no tocado por jtag_pio_write_read → inicializar en lugar de RMW */
+            tdo_data[last_byte] = (uint8_t)((tdo_last & 1u) << last_bit);
+        } else {
+            tdo_data[last_byte] = (uint8_t)(
+                (tdo_data[last_byte] & ~(uint8_t)(1u << last_bit)) |
+                ((tdo_last & 1u) << last_bit));
+        }
     }
 
     /* Update-DR (TMS sigue en 1), luego RTI */

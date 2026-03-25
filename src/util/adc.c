@@ -8,12 +8,20 @@
 #include "hardware/regs/resets.h"
 #include "hardware/regs/adc.h"
 #include "hardware/regs/pads_bank0.h"
+#include "pico/time.h"
+
+/* Tiempo máximo de espera para cualquier operación del ADC.
+ * Una conversión normal tarda menos de 10 µs; 10 ms es un margen
+ * muy holgado que cubre cualquier anomalía sin bloquear el firmware. */
+#define ADC_TIMEOUT_US 10000u
 
 void adc_sense_init(void) {
     /* Sacar el ADC del reset */
     hw_clear_bits_raw(&resets_hw->reset, RESETS_RESET_ADC_BITS);
-    while (!(resets_hw->reset_done & RESETS_RESET_ADC_BITS))
-        ;
+    uint32_t deadline = time_us_32() + ADC_TIMEOUT_US;
+    while (!(resets_hw->reset_done & RESETS_RESET_ADC_BITS)) {
+        if ((int32_t)(time_us_32() - deadline) >= 0) return;
+    }
 
     /*
      * Configurar GP26 como entrada analógica:
@@ -27,8 +35,10 @@ void adc_sense_init(void) {
 
     /* Habilitar ADC y esperar a que esté listo */
     adc_hw->cs = ADC_CS_EN_BITS;
-    while (!(adc_hw->cs & ADC_CS_READY_BITS))
-        ;
+    deadline = time_us_32() + ADC_TIMEOUT_US;
+    while (!(adc_hw->cs & ADC_CS_READY_BITS)) {
+        if ((int32_t)(time_us_32() - deadline) >= 0) return;
+    }
 }
 
 /*
@@ -49,8 +59,10 @@ uint16_t adc_read_vref_mv(void) {
     adc_hw->cs = cs;
 
     /* Esperar fin de conversión */
-    while (!(adc_hw->cs & ADC_CS_READY_BITS))
-        ;
+    uint32_t deadline = time_us_32() + ADC_TIMEOUT_US;
+    while (!(adc_hw->cs & ADC_CS_READY_BITS)) {
+        if ((int32_t)(time_us_32() - deadline) >= 0) return 0u;
+    }
 
     uint32_t raw = adc_hw->result & 0xFFFu;  /* bits [11:0] — resultado 12-bit */
     return (uint16_t)((raw * 6600u) >> 12);

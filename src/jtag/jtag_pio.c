@@ -14,6 +14,7 @@
 #include "hardware/structs/sio.h"
 #include "hardware/structs/io_bank0.h"
 #include "pico/time.h"
+#include "hardware/watchdog.h"
 
 /* Valores de FUNCSEL para los pines GPIO (RP2040 datasheet, Table 5) */
 #define GPIO_FUNC_SIO   5u
@@ -130,6 +131,26 @@ void jtag_pio_init(void) {
     /* Reservar canales DMA: TX (tdi_buf → PIO TX FIFO) y RX (PIO RX FIFO → s_rx_words) */
     s_dma_tx = dma_claim_unused_channel(true);
     s_dma_rx = dma_claim_unused_channel(true);
+
+    /*
+     * Pre-configurar la parte estática de ambos canales DMA.
+     * DREQ, tamaño de transferencia e incremento de puntero no cambian
+     * entre transferencias; solo dirección y conteo varían por llamada.
+     * Con start=false los canales quedan configurados pero inactivos.
+     */
+    dma_channel_config tx_cfg = dma_channel_get_default_config(s_dma_tx);
+    channel_config_set_read_increment(&tx_cfg, true);
+    channel_config_set_write_increment(&tx_cfg, false);
+    channel_config_set_dreq(&tx_cfg, pio_get_dreq(s_pio, s_sm, true));
+    channel_config_set_transfer_data_size(&tx_cfg, DMA_SIZE_8);
+    dma_channel_configure(s_dma_tx, &tx_cfg, &s_pio->txf[s_sm], NULL, 0, false);
+
+    dma_channel_config rx_cfg = dma_channel_get_default_config(s_dma_rx);
+    channel_config_set_read_increment(&rx_cfg, false);
+    channel_config_set_write_increment(&rx_cfg, true);
+    channel_config_set_dreq(&rx_cfg, pio_get_dreq(s_pio, s_sm, false));
+    channel_config_set_transfer_data_size(&rx_cfg, DMA_SIZE_32);
+    dma_channel_configure(s_dma_rx, &rx_cfg, s_rx_words, &s_pio->rxf[s_sm], 0, false);
 }
 
 void jtag_set_freq(uint32_t freq_khz) {
@@ -171,33 +192,20 @@ bool jtag_pio_write_read(const uint8_t *tdi_buf, uint8_t *tdo_buf,
     pio_sm_put_blocking(s_pio, s_sm, len_bits - 1u);
 
     /*
-     * TX DMA: transfiere tdi_buf al TX FIFO byte a byte (DMA_SIZE_8).
-     * OUT shift a la derecha → LSB del byte sale primero → LSB-first JTAG.
-     */
-    dma_channel_config tx_cfg = dma_channel_get_default_config(s_dma_tx);
-    channel_config_set_read_increment(&tx_cfg, true);
-    channel_config_set_write_increment(&tx_cfg, false);
-    channel_config_set_dreq(&tx_cfg, pio_get_dreq(s_pio, s_sm, true));
-    channel_config_set_transfer_data_size(&tx_cfg, DMA_SIZE_8);
-    dma_channel_configure(s_dma_tx, &tx_cfg,
-        &s_pio->txf[s_sm], tdi_buf, num_bytes, true);
-
-    /*
-     * RX DMA: captura words de 32 bits del RX FIFO → s_rx_words (DMA_SIZE_32).
-     * Con IN shift a la derecha, cada word del FIFO contiene el byte TDO
-     * capturado en los bits [31:24].  La extracción con >> 24 se hace abajo.
+     * Lanzar RX antes que TX: el RX FIFO ya tiene el DREQ activo en cuanto
+     * el PIO empieza a procesar; armarlo primero evita que el primer word
+     * quede huérfano en el FIFO.
+     * Solo se actualizan dirección destino y conteo — la config estática
+     * (DREQ, DMA_SIZE_32, incremento) fue escrita una vez en jtag_pio_init.
      *
      * Ambos DMAs corren en paralelo: la CPU queda libre mientras el PIO
-     * genera los clocks JTAG.  En modo multi-core (Core 1), esto permite
-     * que Core 0 siga atendiendo USB durante la transferencia.
+     * genera los clocks JTAG, permitiendo que las IRQs USB sigan activas.
      */
-    dma_channel_config rx_cfg = dma_channel_get_default_config(s_dma_rx);
-    channel_config_set_read_increment(&rx_cfg, false);   /* origen fijo: RX FIFO */
-    channel_config_set_write_increment(&rx_cfg, true);
-    channel_config_set_dreq(&rx_cfg, pio_get_dreq(s_pio, s_sm, false));
-    channel_config_set_transfer_data_size(&rx_cfg, DMA_SIZE_32);
-    dma_channel_configure(s_dma_rx, &rx_cfg,
-        s_rx_words, &s_pio->rxf[s_sm], num_bytes, true);
+    dma_channel_set_write_addr(s_dma_rx, s_rx_words, false);
+    dma_channel_set_trans_count(s_dma_rx, num_bytes, true);   /* lanzar RX */
+
+    dma_channel_set_read_addr(s_dma_tx, tdi_buf, false);
+    dma_channel_set_trans_count(s_dma_tx, num_bytes, true);   /* lanzar TX */
 
     /*
      * Esperar a que el DMA RX termine con timeout calculado.
@@ -218,6 +226,7 @@ bool jtag_pio_write_read(const uint8_t *tdi_buf, uint8_t *tdo_buf,
             jtag_pio_recover();
             return false;
         }
+        watchdog_update();   /* evitar reset WDT en transferencias largas a baja frecuencia */
     }
     dma_channel_wait_for_finish_blocking(s_dma_tx);   /* ya casi terminado */
 
@@ -281,11 +290,6 @@ bool jtag_pio_write(const uint8_t *tdi_buf, uint32_t len_bits) {
     while (len_bits > 0u) {
         uint32_t chunk_bits  = (len_bits > 512u) ? 512u : len_bits;
         uint32_t chunk_bytes = (chunk_bits + 7u) / 8u;
-
-        if (chunk_bytes > (uint32_t)sizeof(tdo_discard)) {
-            chunk_bytes = (uint32_t)sizeof(tdo_discard);
-            chunk_bits  = chunk_bytes * 8u;
-        }
 
         if (!jtag_pio_write_read(tdi_buf, tdo_discard, chunk_bits))
             return false;

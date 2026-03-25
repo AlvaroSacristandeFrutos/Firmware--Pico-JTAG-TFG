@@ -1,4 +1,5 @@
 C:\Proyecto\jlink-pico-probe\dll\src\pico_transport.c;C:\Proyecto\jlink-pico-probe\dll\build64\JLink_x64.dir\Release\pico_transport.obj
 C:\Proyecto\jlink-pico-probe\dll\src\com_detect.c;C:\Proyecto\jlink-pico-probe\dll\build64\JLink_x64.dir\Release\com_detect.obj
 C:\Proyecto\jlink-pico-probe\dll\src\jtag_chain.c;C:\Proyecto\jlink-pico-probe\dll\build64\JLink_x64.dir\Release\jtag_chain.obj
+C:\Proyecto\jlink-pico-probe\dll\src\jtag_tap_track.c;C:\Proyecto\jlink-pico-probe\dll\build64\JLink_x64.dir\Release\jtag_tap_track.obj
 C:\Proyecto\jlink-pico-probe\dll\src\jlink_api.c;C:\Proyecto\jlink-pico-probe\dll\build64\JLink_x64.dir\Release\jlink_api.obj

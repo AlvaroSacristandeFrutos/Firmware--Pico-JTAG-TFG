@@ -330,8 +330,6 @@ static void usb_handle_buff_status(uint32_t buffers) {
 /*  Reset de bus                                                           */
 /* ---------------------------------------------------------------------- */
 
-static volatile uint32_t bus_reset_count = 0;
-
 static void usb_bus_reset(void) {
     s_pending_addr = 0;
     usb_hw->dev_addr_ctrl = 0;

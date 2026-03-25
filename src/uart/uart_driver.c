@@ -15,6 +15,7 @@
 #include "hardware/uart.h"
 #include "hardware/gpio.h"
 #include "hardware/irq.h"
+#include "hardware/watchdog.h"
 
 /* ---------------------------------------------------------------------- */
 /*  Buffer circular RX                                                     */
@@ -65,8 +66,13 @@ void uart_driver_set_baud(uint32_t baud_hz) {
 
 void uart_driver_send(const uint8_t *data, uint16_t len) {
     if (len > 0u) led_onboard_toggle();
-    for (uint16_t i = 0u; i < len; i++)
+    for (uint16_t i = 0u; i < len; i++) {
+        /* Alimentar el watchdog cada 32 bytes para evitar reset en baudrates bajos.
+         * A 1200 baud (mínimo práctico), llenar la FIFO de 32 bytes tarda ~267 ms,
+         * muy por debajo de la ventana de 2 s del watchdog. */
+        if ((i & 31u) == 0u) watchdog_update();
         uart_putc_raw(uart0, data[i]);
+    }
 }
 
 uint16_t uart_driver_recv(uint8_t *buf, uint16_t max_len) {
