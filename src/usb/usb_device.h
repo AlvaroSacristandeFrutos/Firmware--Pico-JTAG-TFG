@@ -34,4 +34,9 @@ struct usb_endpoint_configuration *usb_get_endpoint_configuration(uint8_t addr);
  * hasta que todos los chunks son aceptados por el hardware. */
 void cdc_send(const uint8_t *data, uint16_t len);
 
+/* Envía datos al host por UART CDC Data IN (EP4 IN, 0x84).
+ * Fragmenta en chunks de 64 bytes y bloquea (spin con ISR activa)
+ * hasta que todos los chunks son aceptados por el hardware. */
+void uart_cdc_send(const uint8_t *data, uint16_t len);
+
 #endif /* USB_DEVICE_H */

@@ -1,0 +1,11 @@
+﻿  Building Custom Rule C:/Proyecto/jlink-pico-probe/dll/CMakeLists.txt
+  pico_transport.c
+  com_detect.c
+  jtag_chain.c
+  jtag_tap_track.c
+  jlink_api.c
+  Generando código...
+     Creando biblioteca C:/Proyecto/jlink-pico-probe/dll/build64/Debug/JLink_x64.lib y objeto C:/Proyecto/jlink-pico-probe/dll/build64/Debug/JLink_x64.exp
+  JLink_x64.vcxproj -> C:\Proyecto\jlink-pico-probe\dll\build64\Debug\JLink_x64.dll
+  "pwsh.exe" no se reconoce como un comando interno o externo,
+  programa o archivo por lotes ejecutable.

@@ -4,11 +4,15 @@
  * (Copyright (c) 2020 Raspberry Pi (Trading) Ltd, licencia BSD-3-Clause)
  *
  * VID/PID: 0x2E8A / 0x000A  (Raspberry Pi Pico, CDC composite)
- * 2 interfaces: CDC ACM Control (MI_00) + CDC Data (MI_01)
- * Endpoints:
+ * 4 interfaces: CDC ACM Control (MI_00) + CDC Data (MI_01)
+ *               UART CDC ACM Control (MI_02) + UART CDC Data (MI_03)
+ * Endpoints (8 total):
  *   EP1 IN  (0x81) interrupt — notificaciones CDC (nunca armado)
  *   EP3 OUT (0x03) bulk     — datos CDC host→device (protocolo PicoAdapter)
  *   EP3 IN  (0x83) bulk     — datos CDC device→host (respuestas PicoAdapter)
+ *   EP2 IN  (0x82) interrupt — notificaciones UART CDC (nunca armado)
+ *   EP4 OUT (0x04) bulk     — datos UART host→device
+ *   EP4 IN  (0x84) bulk     — datos UART device→host
  */
 
 #include "usb_descriptors.h"
@@ -16,13 +20,17 @@
 #include <string.h>
 
 /*
- * Declaraciones adelantadas de los handlers de endpoint definidos en usb_device.c.
+ * Declaraciones adelantadas de los handlers de endpoint definidos en usb_device.c
+ * y uart_bridge.c.
  */
 void ep0_in_handler(uint8_t *buf, uint16_t len);
 void ep0_out_handler(uint8_t *buf, uint16_t len);
 void cdc_notify_in_handler(uint8_t *buf, uint16_t len);  /* CDC EP1 IN  (0x81) notify         */
 void cdc_data_out_handler(uint8_t *buf, uint16_t len);   /* CDC EP3 OUT (0x03) datos entrantes */
 void cdc_data_in_handler(uint8_t *buf, uint16_t len);    /* CDC EP3 IN  (0x83) datos salientes */
+void uart_notify_in_handler(uint8_t *buf, uint16_t len); /* UART EP2 IN  (0x82) notify        */
+void uart_data_out_handler(uint8_t *buf, uint16_t len);  /* UART EP4 OUT (0x04) datos entrada */
+void uart_data_in_handler(uint8_t *buf, uint16_t len);   /* UART EP4 IN  (0x84) datos salida  */
 
 /* ---------------------------------------------------------------------- */
 /*  Descriptores de endpoint                                               */
@@ -76,6 +84,36 @@ static const struct usb_endpoint_descriptor cdc_ep_data_in = {
     .bInterval        = 0
 };
 
+/* UART EP2 IN interrupt — notificaciones UART CDC (0x82, nunca armado) */
+static const struct usb_endpoint_descriptor uart_ep_notify = {
+    .bLength          = sizeof(struct usb_endpoint_descriptor),
+    .bDescriptorType  = USB_DT_ENDPOINT,
+    .bEndpointAddress = UART_EP_NOTIFY,   /* 0x82 */
+    .bmAttributes     = USB_TRANSFER_TYPE_INTERRUPT,
+    .wMaxPacketSize   = 16,
+    .bInterval        = 255
+};
+
+/* UART EP4 OUT bulk — datos host→device (0x04) */
+static const struct usb_endpoint_descriptor uart_ep_data_out = {
+    .bLength          = sizeof(struct usb_endpoint_descriptor),
+    .bDescriptorType  = USB_DT_ENDPOINT,
+    .bEndpointAddress = UART_EP_DATA_OUT, /* 0x04 */
+    .bmAttributes     = USB_TRANSFER_TYPE_BULK,
+    .wMaxPacketSize   = 64,
+    .bInterval        = 0
+};
+
+/* UART EP4 IN bulk — datos device→host (0x84) */
+static const struct usb_endpoint_descriptor uart_ep_data_in = {
+    .bLength          = sizeof(struct usb_endpoint_descriptor),
+    .bDescriptorType  = USB_DT_ENDPOINT,
+    .bEndpointAddress = UART_EP_DATA_IN,  /* 0x84 */
+    .bmAttributes     = USB_TRANSFER_TYPE_BULK,
+    .wMaxPacketSize   = 64,
+    .bInterval        = 0
+};
+
 /* ---------------------------------------------------------------------- */
 /*  Descriptor de dispositivo                                              */
 /* ---------------------------------------------------------------------- */
@@ -102,11 +140,11 @@ static const struct usb_device_descriptor device_descriptor = {
 };
 
 /* ---------------------------------------------------------------------- */
-/*  Descriptor de configuración completo (75 bytes, pre-construido)       */
+/*  Descriptor de configuración completo (141 bytes, pre-construido)      */
 /*                                                                         */
 /*  Estructura:                                                            */
 /*    [  9] Config header                                                  */
-/*    [  8] IAD (interfaces 0+1 como función CDC)                         */
+/*    [  8] IAD (interfaces 0+1 como función CDC — PicoAdapter)           */
 /*    [  9] Interface 0: CDC ACM Control (class 0x02/0x02/0x01)           */
 /*    [  5] CDC Header Functional Descriptor                               */
 /*    [  4] CDC ACM Functional Descriptor                                  */
@@ -116,19 +154,29 @@ static const struct usb_device_descriptor device_descriptor = {
 /*    [  9] Interface 1: CDC Data (class 0x0A/0x00/0x00)                 */
 /*    [  7] EP3 OUT bulk (datos host→device, 0x03)                       */
 /*    [  7] EP3 IN  bulk (datos device→host, 0x83)                       */
-/*  TOTAL = 75 bytes = 0x4B                                               */
+/*    [  8] IAD (interfaces 2+3 como función CDC — UART bridge)           */
+/*    [  9] Interface 2: CDC ACM Control (class 0x02/0x02/0x01)           */
+/*    [  5] CDC Header Functional Descriptor                               */
+/*    [  4] CDC ACM Functional Descriptor (bmCapabilities=0x02)           */
+/*    [  5] CDC Union Functional Descriptor                                */
+/*    [  5] CDC Call Management Functional Descriptor                      */
+/*    [  7] EP2 IN interrupt (UART notify, 0x82, nunca armado)            */
+/*    [  9] Interface 3: CDC Data (class 0x0A/0x00/0x00)                 */
+/*    [  7] EP4 OUT bulk (datos host→device, 0x04)                       */
+/*    [  7] EP4 IN  bulk (datos device→host, 0x84)                       */
+/*  TOTAL = 75 + 66 = 141 bytes = 0x8D                                   */
 /* ---------------------------------------------------------------------- */
 static const uint8_t s_config_desc[] = {
     /* --- Cabecera de configuración (9 bytes) --- */
     0x09, 0x02,         /* bLength=9, bDescriptorType=CONFIGURATION */
-    0x4B, 0x00,         /* wTotalLength=75 (LE) */
-    0x02,               /* bNumInterfaces=2 */
+    0x8D, 0x00,         /* wTotalLength=141 (LE) */
+    0x04,               /* bNumInterfaces=4 */
     0x01,               /* bConfigurationValue=1 */
     0x00,               /* iConfiguration=0 */
     0xC0,               /* bmAttributes: self-powered */
     0x32,               /* bMaxPower: 100 mA */
 
-    /* --- IAD: agrupa interfaces 0+1 como función CDC (8 bytes) --- */
+    /* --- IAD: agrupa interfaces 0+1 como función CDC PicoAdapter (8 bytes) --- */
     0x08, 0x0B,         /* bLength=8, bDescriptorType=INTERFACE_ASSOCIATION */
     0x00,               /* bFirstInterface=0 */
     0x02,               /* bInterfaceCount=2 */
@@ -195,6 +243,78 @@ static const uint8_t s_config_desc[] = {
     0x02,               /* bmAttributes=bulk */
     0x40, 0x00,         /* wMaxPacketSize=64 */
     0x00,               /* bInterval=0 */
+
+    /* ================================================================== */
+    /* Second CDC function: UART transparent bridge (interfaces 2+3)      */
+    /* ================================================================== */
+
+    /* --- IAD: agrupa interfaces 2+3 como función CDC UART (8 bytes) --- */
+    0x08, 0x0B,         /* bLength=8, bDescriptorType=INTERFACE_ASSOCIATION */
+    0x02,               /* bFirstInterface=2 */
+    0x02,               /* bInterfaceCount=2 */
+    0x02,               /* bFunctionClass=CDC */
+    0x02,               /* bFunctionSubClass=ACM */
+    0x01,               /* bFunctionProtocol=AT commands */
+    0x00,               /* iFunction=0 */
+
+    /* --- Interface 2: CDC ACM Control (9 bytes) --- */
+    0x09, 0x04,         /* bLength=9, bDescriptorType=INTERFACE */
+    0x02,               /* bInterfaceNumber=2 */
+    0x00,               /* bAlternateSetting=0 */
+    0x01,               /* bNumEndpoints=1 */
+    0x02,               /* bInterfaceClass=CDC */
+    0x02,               /* bInterfaceSubClass=ACM */
+    0x01,               /* bInterfaceProtocol=AT commands */
+    0x00,               /* iInterface=0 */
+
+    /* CDC Header Functional Descriptor (5 bytes) */
+    0x05, 0x24, 0x00,   /* bFunctionLength=5, CS_INTERFACE, HEADER */
+    0x10, 0x01,         /* bcdCDC=1.10 */
+
+    /* CDC ACM Functional Descriptor (4 bytes) */
+    0x04, 0x24, 0x02,   /* bFunctionLength=4, CS_INTERFACE, ABSTRACT_CONTROL_MANAGEMENT */
+    0x02,               /* bmCapabilities=0x02: supports SET_LINE_CODING */
+
+    /* CDC Union Functional Descriptor (5 bytes) */
+    0x05, 0x24, 0x06,   /* bFunctionLength=5, CS_INTERFACE, UNION */
+    0x02,               /* bControlInterface=2 */
+    0x03,               /* bSubordinateInterface0=3 */
+
+    /* CDC Call Management Functional Descriptor (5 bytes) */
+    0x05, 0x24, 0x01,   /* bFunctionLength=5, CS_INTERFACE, CALL_MANAGEMENT */
+    0x00,               /* bmCapabilities=0 */
+    0x03,               /* bDataInterface=3 */
+
+    /* EP2 IN interrupt — notify UART CDC (7 bytes) */
+    0x07, 0x05,         /* bLength=7, bDescriptorType=ENDPOINT */
+    0x82,               /* bEndpointAddress=EP2 IN */
+    0x03,               /* bmAttributes=interrupt */
+    0x10, 0x00,         /* wMaxPacketSize=16 */
+    0xFF,               /* bInterval=255 ms */
+
+    /* --- Interface 3: CDC Data (9 bytes) --- */
+    0x09, 0x04,         /* bLength=9, bDescriptorType=INTERFACE */
+    0x03,               /* bInterfaceNumber=3 */
+    0x00,               /* bAlternateSetting=0 */
+    0x02,               /* bNumEndpoints=2 */
+    0x0A,               /* bInterfaceClass=CDC Data */
+    0x00,               /* bInterfaceSubClass=0 */
+    0x00,               /* bInterfaceProtocol=0 */
+    0x00,               /* iInterface=0 */
+
+    /* EP4 OUT bulk — datos UART host→device (7 bytes) */
+    0x07, 0x05,         /* bLength=7, bDescriptorType=ENDPOINT */
+    0x04,               /* bEndpointAddress=EP4 OUT */
+    0x02,               /* bmAttributes=bulk */
+    0x40, 0x00,         /* wMaxPacketSize=64 */
+    0x00,               /* bInterval=0 */
+
+    /* EP4 IN bulk — datos UART device→host (7 bytes) */
+    0x07, 0x05,         /* bLength=7, bDescriptorType=ENDPOINT */
+    0x84,               /* bEndpointAddress=EP4 IN */
+    0x02,               /* bmAttributes=bulk */
+    0x40, 0x00,         /* wMaxPacketSize=64 */
+    0x00,               /* bInterval=0 */
 };
 
 /* ---------------------------------------------------------------------- */
@@ -258,6 +378,27 @@ struct usb_device_configuration dev_config = {
             .endpoint_control = &usb_dpram->ep_ctrl[2].in,
             .buffer_control   = &usb_dpram->ep_buf_ctrl[3].in,
             .data_buffer      = &usb_dpram->epx_data[2 * 64],
+        },
+        {   /* EP2 IN (0x82) — UART notify (nunca armado) */
+            .descriptor       = &uart_ep_notify,
+            .handler          = &uart_notify_in_handler,
+            .endpoint_control = &usb_dpram->ep_ctrl[1].in,
+            .buffer_control   = &usb_dpram->ep_buf_ctrl[2].in,
+            .data_buffer      = &usb_dpram->epx_data[3 * 64],
+        },
+        {   /* EP4 OUT (0x04) — UART datos host→device */
+            .descriptor       = &uart_ep_data_out,
+            .handler          = &uart_data_out_handler,
+            .endpoint_control = &usb_dpram->ep_ctrl[3].out,
+            .buffer_control   = &usb_dpram->ep_buf_ctrl[4].out,
+            .data_buffer      = &usb_dpram->epx_data[4 * 64],
+        },
+        {   /* EP4 IN (0x84) — UART datos device→host */
+            .descriptor       = &uart_ep_data_in,
+            .handler          = &uart_data_in_handler,
+            .endpoint_control = &usb_dpram->ep_ctrl[3].in,
+            .buffer_control   = &usb_dpram->ep_buf_ctrl[4].in,
+            .data_buffer      = &usb_dpram->epx_data[5 * 64],
         },
     }
 };

@@ -431,26 +431,6 @@ static void handle_uart_set_baud(const uint8_t *payload, uint16_t len) {
 }
 
 /*
- * CMD_UART_SEND (0x21) — payload: [data: N bytes]
- * Envía N bytes al target por UART0 (GP12 TX).
- */
-static void handle_uart_send(const uint8_t *payload, uint16_t len) {
-    if (len > 0u)
-        uart_driver_send(payload, len);
-    send_resp_ok();
-}
-
-/*
- * CMD_UART_RECV (0x22) — sin payload
- * Devuelve hasta 512 bytes del buffer RX circular de UART0 (GP13 RX).
- * RESP_DATA con 0 bytes es válido (buffer vacío).
- */
-static void handle_uart_recv(void) {
-    uint16_t got = uart_driver_recv(s_payload, 512u);
-    send_resp_data(s_payload, got);
-}
-
-/*
  * CMD_SET_LED — payload: [mask: u8]
  *   bit0 = LED verde (GP14): 1=encendido, 0=apagado
  *   bit1 = LED rojo  (GP15): 1=encendido, 0=apagado
@@ -512,12 +492,6 @@ static void dispatch(void) {
         break;
     case CMD_UART_SET_BAUD:
         handle_uart_set_baud(s_payload, s_len);
-        break;
-    case CMD_UART_SEND:
-        handle_uart_send(s_payload, s_len);
-        break;
-    case CMD_UART_RECV:
-        handle_uart_recv();
         break;
     default:
         send_resp_error();

@@ -21,5 +21,5 @@ void protocol_feed(uint8_t byte);
 /* ---------------------------------------------------------------------- */
 
 #define CMD_UART_SET_BAUD  0x20u   /* payload: u32 LE (Hz)  → RESP_OK   */
-#define CMD_UART_SEND      0x21u   /* payload: N bytes      → RESP_OK   */
-#define CMD_UART_RECV      0x22u   /* payload: —            → RESP_DATA */
+/* CMD_UART_SEND (0x21) y CMD_UART_RECV (0x22) eliminados:
+ * el puente UART transparente usa ahora la segunda interfaz CDC (MI_02/MI_03). */

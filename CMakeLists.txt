@@ -19,6 +19,7 @@ add_executable(jlink_pico_probe
     src/cdc/cdc_rx.c
     src/cdc/pico_protocol.c
     src/uart/uart_driver.c
+    src/uart/uart_bridge.c
     src/util/led.c
     src/util/adc.c
 )

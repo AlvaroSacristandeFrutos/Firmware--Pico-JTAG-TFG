@@ -23,6 +23,7 @@
 #include "jtag/jtag_pio.h"
 #include "cdc/cdc_rx.h"
 #include "uart/uart_driver.h"
+#include "uart/uart_bridge.h"
 
 #include "hardware/regs/addressmap.h"
 #include "hardware/watchdog.h"
@@ -40,6 +41,7 @@ int main(void) {
     adc_sense_init();
     jtag_pio_init();
     uart_driver_init(115200u);
+    uart_bridge_init();
     cdc_rx_init();
     usb_device_init();
 
@@ -73,6 +75,7 @@ int main(void) {
      * ------------------------------------------------------------------ */
     while (true) {
         watchdog_update();
-        cdc_rx_task();       /* drena buffer RX y llama a protocol_feed() */
+        cdc_rx_task();        /* drena buffer RX y llama a protocol_feed() */
+        uart_bridge_task();   /* puente UART↔USB transparente (MI_02/MI_03) */
     }
 }

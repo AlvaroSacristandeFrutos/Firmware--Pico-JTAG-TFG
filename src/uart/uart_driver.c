@@ -31,6 +31,8 @@ static uint8_t           s_rx_buf[UART_RX_BUF_SIZE];
 static volatile uint16_t s_rx_head = 0u;   /* escrito por ISR  */
 static          uint16_t s_rx_tail = 0u;   /* leído por main   */
 
+static uint32_t s_current_baud = 115200u;
+
 /* ---------------------------------------------------------------------- */
 /*  ISR                                                                    */
 /* ---------------------------------------------------------------------- */
@@ -51,9 +53,11 @@ static void uart0_rx_isr(void) {
 /* ---------------------------------------------------------------------- */
 
 void uart_driver_init(uint32_t baud_hz) {
+    s_current_baud = baud_hz;
     uart_init(uart0, baud_hz);
     gpio_set_function(PIN_UART_TX, GPIO_FUNC_UART);  /* GP12 */
     gpio_set_function(PIN_UART_RX, GPIO_FUNC_UART);  /* GP13 */
+    gpio_pull_up(PIN_UART_RX);                        /* evitar ruido por pin flotante sin target */
 
     irq_set_exclusive_handler(UART0_IRQ, uart0_rx_isr);
     irq_set_enabled(UART0_IRQ, true);
@@ -61,7 +65,12 @@ void uart_driver_init(uint32_t baud_hz) {
 }
 
 void uart_driver_set_baud(uint32_t baud_hz) {
+    s_current_baud = baud_hz;
     uart_set_baudrate(uart0, baud_hz);
+}
+
+uint32_t uart_driver_get_baud(void) {
+    return s_current_baud;
 }
 
 void uart_driver_send(const uint8_t *data, uint16_t len) {

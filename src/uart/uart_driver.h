@@ -20,6 +20,9 @@ void     uart_driver_init(uint32_t baud_hz);
 /* Cambia la velocidad en tiempo de ejecución. */
 void     uart_driver_set_baud(uint32_t baud_hz);
 
+/* Devuelve la velocidad configurada actualmente (en Hz). */
+uint32_t uart_driver_get_baud(void);
+
 /* Envía len bytes al target (bloqueante). */
 void     uart_driver_send(const uint8_t *data, uint16_t len);
 

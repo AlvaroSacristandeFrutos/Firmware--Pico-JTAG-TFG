@@ -12,6 +12,10 @@
 /* ---- Endpoint handler callback type ---- */
 typedef void (*usb_ep_handler)(uint8_t *buf, uint16_t len);
 
+/* Total number of endpoint configurations in dev_config.endpoints:
+ * EP0 OUT, EP0 IN, EP1 IN, EP3 OUT, EP3 IN, EP2 IN, EP4 OUT, EP4 IN */
+#define USB_EP_COUNT  8
+
 /* ---- Endpoint configuration (from dev_lowlevel.h) ---- */
 struct usb_endpoint_configuration {
     const struct usb_endpoint_descriptor *descriptor;
@@ -40,8 +44,9 @@ struct usb_device_configuration {
     const unsigned char  *lang_descriptor;
     const unsigned char **descriptor_strings;
 
-    /* EP0 OUT, EP0 IN, EP1 IN (notify), EP3 OUT, EP3 IN */
-    struct usb_endpoint_configuration endpoints[5];
+    /* EP0 OUT, EP0 IN, EP1 IN (notify), EP3 OUT, EP3 IN,
+     * EP2 IN (UART notify), EP4 OUT, EP4 IN */
+    struct usb_endpoint_configuration endpoints[USB_EP_COUNT];
 };
 
 /* ---- Endpoint addresses ---- */
@@ -61,6 +66,16 @@ struct usb_device_configuration {
 #define CDC_EP_NOTIFY     (USB_DIR_IN  | 1)   /* 0x81 — interrupt IN: notify CDC */
 #define CDC_EP_DATA_OUT   (USB_DIR_OUT | 3)   /* 0x03 — bulk OUT: datos CDC      */
 #define CDC_EP_DATA_IN    (USB_DIR_IN  | 3)   /* 0x83 — bulk IN:  datos CDC      */
+
+/*
+ * UART bridge CDC endpoints (interfaces 2 y 3):
+ *   EP2 IN  (0x82) interrupt — notificaciones UART CDC (nunca armado)
+ *   EP4 OUT (0x04) bulk     — datos UART host→device
+ *   EP4 IN  (0x84) bulk     — datos UART device→host
+ */
+#define UART_EP_NOTIFY    (USB_DIR_IN  | 2)   /* 0x82 — interrupt IN: notify UART */
+#define UART_EP_DATA_OUT  (USB_DIR_OUT | 4)   /* 0x04 — bulk OUT: datos UART      */
+#define UART_EP_DATA_IN   (USB_DIR_IN  | 4)   /* 0x84 — bulk IN:  datos UART      */
 
 /* ---- Extern declarations ---- */
 extern struct usb_device_configuration dev_config;

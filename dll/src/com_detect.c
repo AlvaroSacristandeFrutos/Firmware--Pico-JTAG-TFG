@@ -204,7 +204,7 @@ static bool detect_by_scan(char *out_port, size_t out_size) {
 bool pico_detect(char *out_port, size_t out_size) {
     if (find_port_by_hwid("USB\\VID_1366&PID_1024&MI_00", out_port, out_size))
         return true;
-    if (find_port_by_hwid("USB\\VID_2E8A&PID_000A", out_port, out_size))
+    if (find_port_by_hwid("USB\\VID_2E8A&PID_000A&MI_00", out_port, out_size))
         return true;
     return detect_by_scan(out_port, out_size);
 }
