@@ -451,8 +451,11 @@ void ep0_in_handler(uint8_t *buf, uint16_t len) {
 }
 
 void ep0_out_handler(uint8_t *buf, uint16_t len) {
-    if (s_set_line_coding_pending != 0xFFu && len >= 7) {
-        if (s_set_line_coding_pending == 2u) {
+    if (s_set_line_coding_pending != 0xFFu) {
+        /* Aplicar el baudrate solo si recibimos los 7 bytes completos y es
+         * la interfaz UART (wIndex==2). Si len < 7 (host malformado) ignoramos
+         * los datos pero igual cerramos el control transfer con el STATUS ZLP. */
+        if (len >= 7u && s_set_line_coding_pending == 2u) {
             uint32_t baud = (uint32_t)buf[0]
                           | ((uint32_t)buf[1] << 8)
                           | ((uint32_t)buf[2] << 16)
@@ -460,7 +463,7 @@ void ep0_out_handler(uint8_t *buf, uint16_t len) {
             if (baud > 0) uart_driver_set_baud(baud);
         }
         s_set_line_coding_pending = 0xFFu;
-        /* STATUS ZLP */
+        /* STATUS ZLP — siempre, independientemente de si len >= 7 */
         struct usb_endpoint_configuration *ep =
             usb_get_endpoint_configuration(EP0_IN_ADDR);
         ep->next_pid = 1;
@@ -516,6 +519,13 @@ void cdc_send(const uint8_t *data, uint16_t len) {
             }
         }
 
+        /* Verificar que el USB sigue configurado antes de armar la transferencia.
+         * Si llegó un bus reset mientras esperábamos en el spin, configured pasa a
+         * false y EP3 IN buffer_control ya fue limpiado por usb_bus_reset(). Armar
+         * la transferencia en ese estado dejaría AVAIL=1 en el buffer, causando que
+         * el host reciba un paquete fantasma con datos obsoletos al reconectar. */
+        if (!configured) return;
+
         uint16_t chunk = len - off;
         if (chunk > 64u) chunk = 64u;
 
@@ -543,6 +553,10 @@ void uart_cdc_send(const uint8_t *data, uint16_t len) {
                 return;
             }
         }
+
+        /* Misma guardia que cdc_send: abortar si el bus se resetó mientras
+         * esperábamos, para no dejar AVAIL=1 en EP4 IN con datos obsoletos. */
+        if (!configured) return;
 
         uint16_t chunk = len - off;
         if (chunk > 64u) chunk = 64u;

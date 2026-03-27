@@ -21,6 +21,7 @@
 #include "uart/uart_driver.h" /* uart_driver_set_baud(), uart_driver_send(), uart_driver_recv() */
 
 #include "hardware/structs/sio.h"
+#include "hardware/watchdog.h"   /* watchdog_update() */
 #include "pico/time.h"    /* busy_wait_us_32() */
 
 #include <stdint.h>
@@ -182,6 +183,10 @@ static void handle_set_clock(const uint8_t *payload, uint16_t len) {
                 | ((uint32_t)payload[1] << 8u)
                 | ((uint32_t)payload[2] << 16u)
                 | ((uint32_t)payload[3] << 24u);
+    /* Rechazar cualquier frecuencia que redondee a 0 kHz.
+     * hz/1000 == 0 para todo hz < 1000; jtag_set_freq(0) clampearía a 1 kHz
+     * silenciosamente, haciendo que GET_CLOCK devuelva un valor diferente al pedido. */
+    if (hz < 1000u) { send_resp_error(); return; }
     jtag_set_freq(hz / 1000u);   /* firmware trabaja en kHz */
     send_resp_ok();
 }
@@ -273,7 +278,10 @@ static void handle_shift_data(const uint8_t *payload, uint16_t len) {
      * hace que jtag_pio_write_read() devuelva false, pero sin este check
      * el error solo se detectaría después de procesar el payload completo.
      */
-    if (num_bytes > 1022u ||
+    /* Validar num_bits directamente para evitar el overflow u32 en num_bytes.
+     * (num_bits + 7u) desborda si num_bits >= 0xFFFFFFF9, haciendo que num_bytes
+     * sea un valor pequeño incorrecto que esquiva el check num_bytes > 1022u. */
+    if (num_bits > 8176u ||
         (uint32_t)len < 5u + num_bytes) {
         send_resp_error();
         return;
@@ -304,7 +312,20 @@ static void handle_reset_hard(const uint8_t *payload, uint16_t len) {
     if (ms == 0u)    ms = 10u;
     if (ms > 1000u)  ms = 1000u;   /* cap: no superar la ventana del watchdog (2 s) */
     sio_hw->gpio_clr = (1u << PIN_RST);
-    busy_wait_us_32((uint32_t)ms * 1000u);
+    /* Esperar en chunks de 100 ms para alimentar el watchdog entre iteraciones.
+     * Necesario porque cdc_rx_task() puede despachar varios RESET_HARD consecutivos
+     * desde el buffer sin retornar al bucle principal (que es donde se llama a
+     * watchdog_update()). Sin esta fragmentación, N × 1000 ms encadenados
+     * podrían superar la ventana de 2 s del watchdog. */
+    {
+        uint32_t us_remaining = (uint32_t)ms * 1000u;
+        while (us_remaining > 0u) {
+            watchdog_update();
+            uint32_t step = (us_remaining > 100000u) ? 100000u : us_remaining;
+            busy_wait_us_32(step);
+            us_remaining -= step;
+        }
+    }
     sio_hw->gpio_set = (1u << PIN_RST);
     send_resp_ok();
 }
@@ -426,6 +447,7 @@ static void handle_uart_set_baud(const uint8_t *payload, uint16_t len) {
                   | ((uint32_t)payload[1] << 8u)
                   | ((uint32_t)payload[2] << 16u)
                   | ((uint32_t)payload[3] << 24u);
+    if (baud == 0u) { send_resp_error(); return; }   /* divisor 0 deja la UART en estado inválido */
     uart_driver_set_baud(baud);
     send_resp_ok();
 }

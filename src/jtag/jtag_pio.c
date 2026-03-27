@@ -170,12 +170,14 @@ bool jtag_pio_write_read(const uint8_t *tdi_buf, uint8_t *tdo_buf,
                          uint32_t len_bits) {
     if (len_bits == 0u) return true;
 
-    uint32_t num_bytes = (len_bits + 7u) / 8u;
-
-    /* Guardia: el buffer DMA s_rx_words tiene 1022 posiciones (u32).
-     * Una transferencia mayor desborda el buffer → rechazar. */
-    if (num_bytes > (uint32_t)(sizeof(s_rx_words) / sizeof(s_rx_words[0])))
+    /* Validar len_bits antes de calcular num_bytes para evitar overflow u32.
+     * Si len_bits >= 0xFFFFFFF9, (len_bits + 7u) desborda y num_bytes resulta
+     * un valor pequeño incorrecto que esquiva la guardia del buffer DMA.
+     * Límite: 1022 palabras de 32 bits = 1022 bytes = 8176 bits. */
+    if (len_bits > (uint32_t)(sizeof(s_rx_words) / sizeof(s_rx_words[0])) * 8u)
         return false;
+
+    uint32_t num_bytes = (len_bits + 7u) / 8u;
 
     /*
      * Vaciar bytes residuales del RX FIFO.
@@ -188,7 +190,13 @@ bool jtag_pio_write_read(const uint8_t *tdi_buf, uint8_t *tdo_buf,
     /*
      * Enviar el contador de bits (N-1) directamente antes de lanzar los DMA.
      * El programa PIO comienza con 'pull block' para recogerlo.
+     *
+     * El TX FIFO debe estar vacío aquí: RX y TX son síncronos bit a bit, por lo que
+     * cuando RX DMA termina (garantía de la llamada anterior) todos los words TX ya
+     * fueron consumidos por el PIO. watchdog_update() como red de seguridad por si
+     * acaso el PIO tardase más de lo esperado en drenar el FIFO.
      */
+    watchdog_update();
     pio_sm_put_blocking(s_pio, s_sm, len_bits - 1u);
 
     /*
@@ -259,7 +267,11 @@ bool jtag_pio_write_read_exit(const uint8_t *tdi_buf, uint8_t *tdo_buf,
             return false;
     }
 
-    /* Raise TMS=1 so the TAP will transition to Exit1 on the next TCK edge. */
+    /* Raise TMS=1 so the TAP will transition to Exit1 on the next TCK edge.
+     * TMS remains HIGH after this function returns (TAP is in Exit1).
+     * Contract: the caller must set TMS explicitly before generating any further
+     * TCK edges. handle_write_tms always calls jtag_tap_set_tms() for the first
+     * bit, so this residual HIGH is safe in the current protocol layer. */
     sio_hw->gpio_set = (1u << PIN_TMS);
 
     /* Extract last TDI bit and shift it through the PIO. */

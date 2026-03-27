@@ -7,6 +7,13 @@
  * lectura de s_rx_head desde el bucle; se declara volatile para garantizar que el
  * compilador no la cachee en un registro.
  *
+ * Ordenación de memoria: en cdc_rx_push la escritura al array s_rx_buf[s_rx_head]
+ * usa el valor de s_rx_head (volatile) como índice, creando una dependencia de datos
+ * que impide al compilador reordenar el write al array posterior al write volatile
+ * de s_rx_head. En Cortex-M0+ (RP2040) no hay write buffers ni ejecución fuera de
+ * orden, por lo que 'volatile' es suficiente para la sincronización ISR↔main en el
+ * mismo core; no se requiere __dmb().
+ *
  * El tamaño del buffer debe ser potencia de 2 para que la operación de módulo
  * se reduzca a un AND bit a bit sin división.
  */
