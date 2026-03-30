@@ -2,6 +2,11 @@
  * jtag_chain.c — Operaciones JTAG de alto nivel sobre pico_transact().
  */
 
+/* Límite superior para la detección de IR total en jtag_scan_chain().
+ * 32 dispositivos × 128 bits IR máx = 4096. El loop termina antes si
+ * la cadena es más corta; este valor actúa como guardia de seguridad. */
+#define JTAG_MAX_IR_TOTAL_BITS  4096u
+
 #include "jtag_chain.h"
 #include "pico_transport.h"
 #include "dll_state.h"
@@ -66,6 +71,7 @@ bool jtag_shift_data(const uint8_t *pTDI, uint8_t *pTDO,
         return true;
 
     uint32_t num_bytes   = (numBits + 7u) / 8u;
+    if (num_bytes > PICO_MAX_PAYLOAD) return false;
     uint16_t payload_len = (uint16_t)(5u + num_bytes);
 
     /* Payload en buffer estático: [numBits:u32 LE][exit:u8][TDI bytes] */
@@ -93,6 +99,7 @@ bool jtag_write_tms(const uint8_t *pTMS, uint32_t numBits) {
         return true;
 
     uint32_t num_bytes   = (numBits + 7u) / 8u;
+    if (num_bytes > PICO_MAX_PAYLOAD) return false;
     uint16_t payload_len = (uint16_t)(2u + num_bytes);
 
     /* Payload en buffer estático: [numBits:u16 LE][TMS bytes] */
@@ -237,7 +244,7 @@ int jtag_scan_chain(JLINKARM_JTAG_IDCODE_INFO *pInfo, int maxDev) {
     uint8_t  probe_tdo    = 0x00u;
     jtag_shift_data(&probe_tdi, &probe_tdo, 1u, false);   /* shift el 0 */
 
-    for (uint32_t k = 0u; k < 512u; k++) {
+    for (uint32_t k = 0u; k < JTAG_MAX_IR_TOTAL_BITS; k++) {
         uint8_t one_tdi = 0x01u;
         uint8_t one_tdo = 0x00u;
         jtag_shift_data(&one_tdi, &one_tdo, 1u, false);

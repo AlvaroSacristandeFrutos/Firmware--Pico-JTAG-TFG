@@ -83,6 +83,61 @@ HANDLE pico_port_open(const char *port_name) {
     return h;
 }
 
+HANDLE pico_port_open_uart(const char *port_name) {
+    char path[64];
+    _snprintf_s(path, sizeof(path), _TRUNCATE, "\\\\.\\%s", port_name);
+
+    HANDLE h = CreateFileA(path,
+                           GENERIC_READ | GENERIC_WRITE,
+                           0, NULL,
+                           OPEN_EXISTING,
+                           FILE_ATTRIBUTE_NORMAL,
+                           NULL);
+    if (h == INVALID_HANDLE_VALUE)
+        return INVALID_HANDLE_VALUE;
+
+    DCB dcb;
+    memset(&dcb, 0, sizeof(dcb));
+    dcb.DCBlength = sizeof(DCB);
+    if (!GetCommState(h, &dcb)) {
+        CloseHandle(h);
+        return INVALID_HANDLE_VALUE;
+    }
+    dcb.BaudRate       = CBR_115200;
+    dcb.ByteSize       = 8;
+    dcb.Parity         = NOPARITY;
+    dcb.StopBits       = ONESTOPBIT;
+    dcb.fBinary        = TRUE;
+    dcb.fParity        = FALSE;
+    dcb.fOutxCtsFlow   = FALSE;
+    dcb.fOutxDsrFlow   = FALSE;
+    dcb.fDtrControl    = DTR_CONTROL_ENABLE;
+    dcb.fRtsControl    = RTS_CONTROL_ENABLE;
+    dcb.fOutX          = FALSE;
+    dcb.fInX           = FALSE;
+    dcb.fErrorChar     = FALSE;
+    dcb.fNull          = FALSE;
+    dcb.fAbortOnError  = FALSE;
+    if (!SetCommState(h, &dcb)) {
+        CloseHandle(h);
+        return INVALID_HANDLE_VALUE;
+    }
+
+    /* Lectura no bloqueante: ReadFile devuelve inmediatamente con los
+     * bytes disponibles (0 si vacío). Escritura con timeout 500 ms. */
+    COMMTIMEOUTS ct;
+    memset(&ct, 0, sizeof(ct));
+    ct.ReadIntervalTimeout        = MAXDWORD;
+    ct.ReadTotalTimeoutMultiplier = 0u;
+    ct.ReadTotalTimeoutConstant   = 0u;
+    ct.WriteTotalTimeoutConstant  = 500u;
+    SetCommTimeouts(h, &ct);
+
+    PurgeComm(h, PURGE_RXCLEAR | PURGE_TXCLEAR);
+
+    return h;
+}
+
 void pico_port_close(HANDLE h) {
     if (h != INVALID_HANDLE_VALUE) {
         PurgeComm(h, PURGE_RXABORT | PURGE_TXABORT | PURGE_RXCLEAR | PURGE_TXCLEAR);

@@ -17,6 +17,7 @@
 #include "usb_common.h"
 #include "usb_descriptors.h"
 #include "cdc/cdc_rx.h"
+#include "cdc/pico_protocol.h"
 #include "uart/uart_driver.h"
 
 #include <string.h>
@@ -387,6 +388,7 @@ static void usb_bus_reset(void) {
     s_pending_addr = 0;
     usb_hw->dev_addr_ctrl = 0;
     configured = false;
+    protocol_reset();
 
     ep0_pending_total = 0;
     ep0_pending_sent  = 0;
@@ -478,6 +480,12 @@ void cdc_notify_in_handler(uint8_t *buf, uint16_t len) {
 
 /* EP3 OUT (0x03): datos CDC del host — almacenar en buffer y re-armar */
 void cdc_data_out_handler(uint8_t *buf, uint16_t len) {
+    /* Clamp defensivo: el buffer de EP3 OUT en DPRAM tiene 64 bytes.
+     * usb_handle_ep_buff_done extrae len del buffer_control (hasta 1023 bits);
+     * ante un bitflip de hardware o errata, len podría superar 64 y causar
+     * un OOB read en DPRAM al iterar en cdc_rx_push. Mismo patrón que
+     * uart_data_out_handler. */
+    if (len > 64u) len = 64u;
     cdc_rx_push(buf, len);
     struct usb_endpoint_configuration *ep =
         usb_get_endpoint_configuration(CDC_EP_DATA_OUT);

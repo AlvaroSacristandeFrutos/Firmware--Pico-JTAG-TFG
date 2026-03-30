@@ -50,6 +50,13 @@
 HANDLE pico_port_open(const char *port_name);
 
 /*
+ * Igual que pico_port_open pero con timeouts de lectura inmediatos
+ * (ReadFile no bloquea: devuelve 0 bytes si el buffer está vacío).
+ * Usado para el puente UART transparente (MI_02).
+ */
+HANDLE pico_port_open_uart(const char *port_name);
+
+/*
  * Cierra el puerto.
  */
 void pico_port_close(HANDLE h);

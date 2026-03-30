@@ -208,3 +208,70 @@ bool pico_detect(char *out_port, size_t out_size) {
         return true;
     return detect_by_scan(out_port, out_size);
 }
+
+/*
+ * Busca el segundo COM port del PicoAdapter (interfaz MI_02 = puente UART
+ * transparente) sin hacer handshake de protocolo: simplemente abre el puerto
+ * y comprueba que el handle es válido.
+ */
+bool pico_detect_uart(char *out_port, size_t out_size) {
+    static const GUID GUID_PORTS =
+        {0x4D36E978,0xE325,0x11CE,{0xBF,0xC1,0x08,0x00,0x2B,0xE1,0x03,0x18}};
+
+    const char *hwid_prefix = "USB\\VID_2E8A&PID_000A&MI_02";
+
+    HDEVINFO hdi = SetupDiGetClassDevsA(&GUID_PORTS, NULL, NULL,
+                                         DIGCF_PRESENT);
+    if (hdi == INVALID_HANDLE_VALUE) return false;
+
+    bool found = false;
+    SP_DEVINFO_DATA did;
+    did.cbSize = sizeof(did);
+
+    for (DWORD i = 0; SetupDiEnumDeviceInfo(hdi, i, &did); i++) {
+        char hwid[512];
+        if (!SetupDiGetDeviceRegistryPropertyA(hdi, &did,
+                SPDRP_HARDWAREID, NULL,
+                (PBYTE)hwid, sizeof(hwid) - 1, NULL))
+            continue;
+        hwid[sizeof(hwid) - 1] = '\0';
+
+        bool match = false;
+        for (char *p = hwid; *p; p += strlen(p) + 1) {
+            if (_strnicmp(p, hwid_prefix, strlen(hwid_prefix)) == 0) {
+                match = true;
+                break;
+            }
+        }
+        if (!match) continue;
+
+        HKEY hKey = SetupDiOpenDevRegKey(hdi, &did,
+                        DICS_FLAG_GLOBAL, 0, DIREG_DEV, KEY_READ);
+        if (hKey == INVALID_HANDLE_VALUE) continue;
+
+        char   port_name[32];
+        DWORD  port_len = sizeof(port_name);
+        DWORD  type;
+        LSTATUS st = RegQueryValueExA(hKey, "PortName", NULL, &type,
+                                      (BYTE *)port_name, &port_len);
+        RegCloseKey(hKey);
+
+        if (st != ERROR_SUCCESS || type != REG_SZ) continue;
+
+        /* Verificar que el puerto se puede abrir (sin handshake de protocolo) */
+        char path[64];
+        _snprintf_s(path, sizeof(path), _TRUNCATE, "\\\\.\\%s", port_name);
+        HANDLE h = CreateFileA(path, GENERIC_READ | GENERIC_WRITE,
+                               0, NULL, OPEN_EXISTING,
+                               FILE_ATTRIBUTE_NORMAL, NULL);
+        if (h == INVALID_HANDLE_VALUE) continue;
+        CloseHandle(h);
+
+        _snprintf_s(out_port, out_size, _TRUNCATE, "%s", port_name);
+        found = true;
+        break;
+    }
+
+    SetupDiDestroyDeviceInfoList(hdi);
+    return found;
+}

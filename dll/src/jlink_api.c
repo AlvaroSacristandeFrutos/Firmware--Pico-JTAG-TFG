@@ -27,6 +27,7 @@
  * ====================================================================== */
 
 HANDLE   g_hCOM           = INVALID_HANDLE_VALUE;
+HANDLE   g_hUART          = INVALID_HANDLE_VALUE;
 int      g_is_open        = 0;
 uint32_t g_serial         = 0u;
 
@@ -66,6 +67,7 @@ BOOL WINAPI DllMain(HINSTANCE hInst, DWORD reason, LPVOID reserved) {
 
     if (reason == DLL_PROCESS_ATTACH) {
         g_hCOM           = INVALID_HANDLE_VALUE;
+        g_hUART          = INVALID_HANDLE_VALUE;
         g_is_open        = 0;
         g_speed_khz      = 4000u;
         g_reset_delay_ms = 10u;
@@ -116,6 +118,14 @@ const char * __cdecl JLINKARM_OpenEx(const char *log, void *reserved) {
         }
     }
 
+    /* Abrir el segundo COM (puente UART transparente, MI_02).
+     * Si no está disponible, PICO_UART_Send/Recv devolverán -1. */
+    {
+        char uart_port[32];
+        if (pico_detect_uart(uart_port, sizeof(uart_port)))
+            g_hUART = pico_port_open_uart(uart_port);
+    }
+
     g_is_open = 1;
     return NULL;   /* NULL = éxito, igual que SEGGER */
 }
@@ -128,6 +138,10 @@ void __cdecl JLINKARM_Close(void) {
     if (g_hCOM != INVALID_HANDLE_VALUE) {
         pico_port_close(g_hCOM);
         g_hCOM = INVALID_HANDLE_VALUE;
+    }
+    if (g_hUART != INVALID_HANDLE_VALUE) {
+        pico_port_close(g_hUART);
+        g_hUART = INVALID_HANDLE_VALUE;
     }
     g_is_open = 0;
 }
@@ -688,29 +702,25 @@ void __cdecl PICO_UART_SetBaud(uint32_t baud) {
 
 /*
  * PICO_UART_Send — envía data[0..len-1] al target por UART (GP12 TX).
+ * Usa el puente transparente EP4 (COM del MI_02), no el protocolo PicoAdapter.
  * Devuelve len si OK, -1 si error.
  */
 int __cdecl PICO_UART_Send(const uint8_t *data, uint16_t len) {
-    if (!g_is_open || !data || len == 0u) return -1;
-    if (!pico_send(g_hCOM, CMD_UART_SEND, data, len)) return -1;
-    uint8_t  resp;
-    uint8_t  tmp[4];
-    uint16_t rlen;
-    if (!pico_recv(g_hCOM, &resp, tmp, &rlen, 500u)) return -1;
-    return (resp == RESP_OK) ? (int)len : -1;
+    if (g_hUART == INVALID_HANDLE_VALUE || !data || len == 0u) return -1;
+    DWORD written = 0;
+    if (!WriteFile(g_hUART, data, (DWORD)len, &written, NULL)) return -1;
+    return (written == (DWORD)len) ? (int)len : -1;
 }
 
 /*
  * PICO_UART_Recv — lee bytes pendientes del buffer RX UART (GP13 RX).
- * Copia hasta max_len bytes en buf.
- * Devuelve el número de bytes copiados (puede ser 0), o -1 si error.
+ * Usa el puente transparente EP4 (COM del MI_02), no el protocolo PicoAdapter.
+ * ReadFile no bloquea gracias a los timeouts inmediatos de pico_port_open_uart.
+ * Devuelve el número de bytes leídos (puede ser 0 si vacío), o -1 si error.
  */
 int __cdecl PICO_UART_Recv(uint8_t *buf, uint16_t max_len) {
-    if (!g_is_open || !buf) return -1;
-    if (!pico_send(g_hCOM, CMD_UART_RECV, NULL, 0u)) return -1;
-    uint8_t  resp;
-    uint16_t rlen = 0u;
-    if (!pico_recv(g_hCOM, &resp, buf, &rlen, 200u)) return -1;
-    if (rlen > max_len) rlen = max_len;
-    return (int)rlen;
+    if (g_hUART == INVALID_HANDLE_VALUE || !buf) return -1;
+    DWORD got = 0;
+    if (!ReadFile(g_hUART, buf, (DWORD)max_len, &got, NULL)) return -1;
+    return (int)got;
 }

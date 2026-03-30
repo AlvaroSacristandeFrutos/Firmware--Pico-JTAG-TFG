@@ -13,6 +13,7 @@
 #include "jtag_tap_track.h"
 
 extern HANDLE   g_hCOM;           /* INVALID_HANDLE_VALUE si cerrado */
+extern HANDLE   g_hUART;          /* COM del puente UART (MI_02), INVALID_HANDLE_VALUE si no disponible */
 extern int      g_is_open;
 extern uint32_t g_serial;         /* número de serie guardado en OpenEx */
 extern uint32_t g_speed_khz;      /* frecuencia JTAG en kHz (default 4000) */

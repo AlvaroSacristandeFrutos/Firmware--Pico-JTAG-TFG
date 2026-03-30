@@ -525,6 +525,13 @@ static void dispatch(void) {
 /*  Parser (máquina de estados byte a byte)                               */
 /* ---------------------------------------------------------------------- */
 
+void protocol_reset(void) {
+    s_state   = ST_WAIT_START;
+    s_recv    = 0u;
+    s_len     = 0u;
+    s_crc_acc = 0u;
+}
+
 void protocol_feed(uint8_t byte) {
     switch (s_state) {
 

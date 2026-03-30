@@ -21,3 +21,10 @@
  * Devuelve true si se encontró un PicoAdapter, false en caso contrario.
  */
 bool pico_detect(char *out_port, size_t out_size);
+
+/*
+ * Busca el puerto COM del puente UART transparente del PicoAdapter
+ * (interfaz MI_02). No realiza handshake de protocolo.
+ * Devuelve true y rellena out_port si se encontró, false si no.
+ */
+bool pico_detect_uart(char *out_port, size_t out_size);

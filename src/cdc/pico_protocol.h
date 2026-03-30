@@ -16,6 +16,11 @@
  */
 void protocol_feed(uint8_t byte);
 
+/* Resetea el estado del parser a ST_WAIT_START. Llamar tras bus reset USB
+ * para que los bytes residuales del buffer RX no se interpreten como
+ * continuación de una trama anterior. */
+void protocol_reset(void);
+
 /* ---------------------------------------------------------------------- */
 /*  Códigos de comando UART (debug del target)                            */
 /* ---------------------------------------------------------------------- */
