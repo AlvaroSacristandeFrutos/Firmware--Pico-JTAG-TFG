@@ -215,7 +215,7 @@ bool pico_recv(HANDLE h,
 
     /* Leer payload */
     if (len > 0u) {
-        if (len > PICO_MAX_PAYLOAD)
+        if (len > PICO_MAX_PAYLOAD || !out_payload)
             return false;
         if (!ReadFile(h, out_payload, len, &got, NULL) || got != (DWORD)len)
             return false;

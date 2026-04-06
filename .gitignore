@@ -11,3 +11,7 @@ node_modules/
 
 # Tests locales (no se suben al repositorio)
 test/
+
+# Documentación y ficheros de explicación generados
+TFG_CONTENIDO_COMPLETO.txt
+tfg_full_report.txt

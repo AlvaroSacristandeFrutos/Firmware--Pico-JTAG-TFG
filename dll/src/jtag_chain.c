@@ -240,6 +240,7 @@ int jtag_scan_chain(JLINKARM_JTAG_IDCODE_INFO *pInfo, int maxDev) {
 
     /* Desplazar un 0 y luego 1s; capturar hasta que el 0 aparece en TDO */
     uint32_t total_ir_len = 0u;
+    bool     found_zero   = false;
     uint8_t  probe_tdi    = 0x00u;   /* primer bit = 0 (el que buscamos) */
     uint8_t  probe_tdo    = 0x00u;
     jtag_shift_data(&probe_tdi, &probe_tdo, 1u, false);   /* shift el 0 */
@@ -249,13 +250,19 @@ int jtag_scan_chain(JLINKARM_JTAG_IDCODE_INFO *pInfo, int maxDev) {
         uint8_t one_tdo = 0x00u;
         jtag_shift_data(&one_tdi, &one_tdo, 1u, false);
         total_ir_len++;
-        if ((one_tdo & 1u) == 0u)   /* el 0 que metimos aparece en TDO */
+        if ((one_tdo & 1u) == 0u) {  /* el 0 que metimos aparece en TDO */
+            found_zero = true;
             break;
+        }
     }
 
     /* Salir Exit1-IR → Update-IR → RTI */
     uint8_t tms_exit_ir[1] = {0x03u};  /* 3 bits: bit0=1, bit1=1, bit2=0 */
     jtag_write_tms(tms_exit_ir, 3u);
+
+    /* Si el 0 nunca apareció: cadena JTAG rota o sin dispositivos */
+    if (!found_zero)
+        return 0;
 
     /* Actualizar resultados */
     g_total_ir_len = total_ir_len;

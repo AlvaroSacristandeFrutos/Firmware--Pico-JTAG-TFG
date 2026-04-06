@@ -423,10 +423,19 @@ int __cdecl JLINKARM_JTAG_StoreGetRaw(const uint8_t *pTDI,
             pre_bits  = (uint32_t)pos;
             post_bits = (uint32_t)(g_dev_count - pos - 1);
         } else {
-            for (int i = 0; i < pos; i++)
-                pre_bits  += (uint32_t)g_dev_list[i].IRLen;
-            for (int i = pos + 1; i < g_dev_count; i++)
-                post_bits += (uint32_t)g_dev_list[i].IRLen;
+            /* Validar que todos los IRLen son conocidos antes de calcular padding */
+            for (int i = 0; i < g_dev_count; i++) {
+                if (g_dev_list[i].IRLen == 0u) {
+                    apply_bypass = false;   /* IRLen desconocido — caer al path directo */
+                    break;
+                }
+            }
+            if (apply_bypass) {
+                for (int i = 0; i < pos; i++)
+                    pre_bits  += (uint32_t)g_dev_list[i].IRLen;
+                for (int i = pos + 1; i < g_dev_count; i++)
+                    post_bits += (uint32_t)g_dev_list[i].IRLen;
+            }
         }
 
         uint32_t total_bits  = pre_bits + numBits + post_bits;

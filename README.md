@@ -39,7 +39,7 @@ usa el **protocolo PicoAdapter** — un formato de trama serie propio:
 [0xA5] [CMD] [LEN_LO] [LEN_HI] [PAYLOAD...] [CRC8]
 ```
 
-El firmware implementa 17 comandos (PING, RESET TAP, desplazamiento de datos JTAG,
+El firmware implementa 15 comandos activos (PING, RESET TAP, desplazamiento de datos JTAG,
 lectura de tensión de referencia, control UART del target, etc.).
 
 ### DLL de Windows (`JLink_x64.dll`)
@@ -396,7 +396,6 @@ jlink-pico-probe/
 │   ├── main.c                  ← Punto de entrada: inicialización y bucle principal
 │   ├── board/
 │   │   ├── board_config.h      ← Pinout completo (JTAG GP16-19, UART GP12-13, LEDs...)
-│   │   ├── clock_init.c/.h     ← Configuración de PLLs (125 MHz sistema, 48 MHz USB)
 │   │   └── gpio_init.c/.h      ← Inicialización de todos los GPIOs del PCB
 │   ├── usb/
 │   │   ├── usb_device.c/.h     ← Controlador USB bare-metal (IRQ-driven, DPRAM)
@@ -404,12 +403,13 @@ jlink-pico-probe/
 │   ├── jtag/
 │   │   ├── jtag_pio.c/.h       ← Motor JTAG: PIO + DMA (transferencia bidireccional)
 │   │   ├── jtag_tap.c/.h       ← Máquina de estados TAP (16 estados, IEEE 1149.1)
-│   │   └── jtag.pio            ← Programa PIO: 8 instrucciones, LSB-first, 2 ciclos/bit
+│   │   └── jtag.pio            ← Programa PIO: 8 instrucciones, LSB-first, 4 ciclos/bit
 │   ├── cdc/
-│   │   ├── cdc_uart.c/.h       ← Recepción de bytes USB-CDC y alimentación al parser
-│   │   └── pico_protocol.c/.h  ← Parser protocolo PicoAdapter (17 comandos, 0x01–0x22)
+│   │   ├── cdc_rx.c/.h         ← Buffer circular RX CDC (ISR → bucle principal)
+│   │   └── pico_protocol.c/.h  ← Parser protocolo PicoAdapter (15 comandos activos)
 │   ├── uart/
-│   │   └── uart_driver.c/.h    ← UART0 IRQ-driven para debug serie del target (GP12/GP13)
+│   │   ├── uart_driver.c/.h    ← UART0 IRQ-driven para debug serie del target (GP12/GP13)
+│   │   └── uart_bridge.c/.h    ← Puente transparente EP4 ↔ UART0 (bridge task)
 │   └── util/
 │       ├── led.c/.h            ← Control de LEDs de estado (verde GP14, rojo GP15)
 │       └── adc.c/.h            ← Lectura de tensión de referencia del target (GP26/ADC0)
@@ -418,10 +418,11 @@ jlink-pico-probe/
     ├── JLink_x64.def           ← Tabla de exportaciones x64 (44 funciones con nombres SEGGER)
     ├── JLinkARM.def            ← Tabla de exportaciones x86 (variante 32-bit)
     └── src/
-        ├── jlink_api.c         ← 44 funciones exportadas: JLINKARM_* + PICO_UART_*
+        ├── jlink_api.c         ← 41 funciones exportadas: JLINKARM_* + PICO_UART_* + JLINK_PICO_*
         ├── pico_transport.c/.h ← Capa serie: construcción/envío de tramas PicoAdapter
         ├── com_detect.c/.h     ← Detección del puerto COM (SetupDI + overlapped I/O)
         ├── jtag_chain.c/.h     ← JTAG de alto nivel: escaneo de cadena, lectura IDCODE
+        ├── jtag_tap_track.c/.h ← Seguimiento de estado TAP en la DLL
         ├── dll_state.h         ← Variables globales compartidas entre módulos
         └── jlink_types.h       ← Structs y tipos compatibles con la API SEGGER
 ```
