@@ -326,6 +326,18 @@ copy dll\build64\Release\JLink_x64.dll <directorio_del_ejecutable>\
 Windows carga la DLL del directorio del ejecutable antes de buscar en otras rutas,
 por lo que nuestra DLL tiene prioridad sobre cualquier otra instalada en el sistema.
 
+### Limpiar la caché de la DLL en JtagScannerQt
+
+JtagScannerQt guarda en un archivo temporal la ruta de la DLL que encontró la última vez,
+para no tener que buscarla en cada arranque. Si recompilas o mueves la DLL y la aplicación
+sigue cargando la versión antigua, borra ese archivo de caché:
+
+```cmd
+del %TEMP%\jlink_dll_cache.txt
+```
+
+La próxima vez que arranque JtagScannerQt buscará la DLL desde cero y usará la nueva.
+
 ---
 
 ## Flashear el Pico
