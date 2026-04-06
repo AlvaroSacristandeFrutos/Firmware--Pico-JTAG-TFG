@@ -17,6 +17,7 @@ código de la aplicación — simplemente poniendo nuestra DLL en el directorio 
 - [Requisitos de hardware](#requisitos-de-hardware)
 - [Instalación de herramientas](#instalación-de-herramientas)
 - [Clonar el repositorio](#clonar-el-repositorio)
+- [Descargar el SDK de Pico](#descargar-el-sdk-de-pico)
 - [Compilar el firmware](#compilar-el-firmware)
 - [Compilar la DLL](#compilar-la-dll)
 - [Flashear el Pico](#flashear-el-pico)
@@ -88,275 +89,253 @@ Hay que instalar herramientas distintas según lo que se quiera compilar:
 
 | Qué compilar | Herramientas necesarias |
 |-------------|------------------------|
-| Solo firmware (`.uf2`) | Git + Python 3.13 + VS Code + extensión Raspberry Pi Pico |
-| Solo DLL (`.dll`) | Git + Visual Studio 2022 con C++ |
+| Solo firmware (`.uf2`) | Git + Python 3.13 + ARM GCC + CMake + Ninja + Visual Studio (C++) |
+| Solo DLL (`.dll`) | Git + Visual Studio (C++) |
 | Ambos | Todo lo anterior |
+
+> **Nota sobre Visual Studio:** tanto **Visual Studio 2022** como **Visual Studio 2026**
+> funcionan correctamente. La única diferencia es el nombre del generador CMake al
+> configurar la DLL por primera vez (ver sección [Compilar la DLL](#compilar-la-dll)).
 
 ---
 
 ### 1. Git
 
-Git es el sistema de control de versiones que se usa para descargar el repositorio.
+Git es necesario para descargar el repositorio y el SDK de Pico.
 
 **Instalación:**
 1. Ve a [https://git-scm.com/download/win](https://git-scm.com/download/win)
 2. Descarga el instalador de 64 bits (`Git-X.XX.X-64-bit.exe`)
-3. Ejecuta el instalador. Las opciones por defecto son correctas en todas las pantallas.
-   La única que merece atención:
-   - En **"Adjusting your PATH environment"**: deja seleccionada la opción
-     **"Git from the command line and also from 3rd-party software"** (opción del medio).
-     Esto añade `git` al PATH del sistema para poder usarlo desde CMD/PowerShell.
+3. Ejecuta el instalador. En **"Adjusting your PATH environment"** deja seleccionada
+   la opción **"Git from the command line and also from 3rd-party software"** (opción del medio).
+   Esto añade `git` al PATH del sistema para usarlo desde cualquier CMD.
 4. Completa la instalación y cierra.
 
-**Verificar:**
-Abre un CMD nuevo (importante: nuevo, para que cargue el PATH actualizado) y ejecuta:
+**Verificar** (en un CMD nuevo):
 ```cmd
 git --version
 ```
-Debe mostrar algo como `git version 2.42.0.windows.2`.
 
 ---
 
-### 2. Python 3.13 (solo para el firmware)
+### 2. Python 3.13
 
 El SDK de Pico necesita Python para generar el código de arranque del procesador
-durante la compilación. **No se usa para programar** — es una dependencia interna del build.
+durante la compilación. No se usa para programar — es una dependencia interna del build.
 
-> **Importante:** Python 3.14 (actualmente en pre-release) **no es compatible** con
-> la versión de CMake incluida en el SDK. Instala la versión 3.13 estable.
+> **Importante:** instala la versión **3.13 estable**. Python 3.14 (pre-release) no es
+> compatible con la versión de CMake del SDK.
 
 **Instalación:**
 1. Ve a [https://www.python.org/downloads/](https://www.python.org/downloads/)
-2. Haz clic en **"Download Python 3.13.x"** (el botón amarillo grande)
-3. Ejecuta el instalador descargado
-4. **Paso crítico:** en la primera pantalla del instalador aparece una casilla en la
-   parte inferior que dice **"Add python.exe to PATH"**. Esta casilla está **desmarcada
-   por defecto**. **Márcala antes de continuar.**
-5. Haz clic en **"Install Now"** y espera a que termine.
+2. Descarga Python 3.13.x y ejecuta el instalador
+3. **Paso crítico:** en la primera pantalla marca **"Add python.exe to PATH"**
+   (está desmarcado por defecto)
+4. Haz clic en **"Install Now"**
 
-**Verificar:**
-Abre un CMD nuevo y ejecuta:
+**Alternativa con winget:**
+```cmd
+winget install Python.Python.3.13 --accept-source-agreements --accept-package-agreements
+```
+
+**Verificar** (en un CMD nuevo):
 ```cmd
 python --version
 ```
-Debe mostrar `Python 3.13.x`. Si no aparece o muestra otra versión, cierra y vuelve
-a abrir el CMD para recargar el PATH.
-
-> **Alternativa con winget** (si tienes winget disponible en Windows 10/11):
-> ```cmd
-> winget install Python.Python.3.13 --accept-source-agreements --accept-package-agreements
-> ```
 
 ---
 
-### 3. Visual Studio Code (solo para el firmware)
+### 3. ARM GCC, CMake y Ninja
 
-VS Code es el editor que usamos para compilar el firmware gracias a la extensión
-de Raspberry Pi. No es imprescindible (se puede compilar desde CMD), pero es la
-forma más cómoda.
+Estas tres herramientas son el núcleo del sistema de compilación del firmware:
 
-**Instalación:**
-1. Ve a [https://code.visualstudio.com/](https://code.visualstudio.com/)
-2. Haz clic en **"Download for Windows"** (descarga el instalador de usuario `.exe`)
-3. Ejecuta el instalador. En la pantalla **"Seleccionar tareas adicionales"** marca:
-   - **"Agregar al PATH"** (permite escribir `code .` en CMD para abrir VS Code)
-   - Las demás opciones son opcionales.
-4. Completa la instalación.
-5. Abre VS Code.
+- **ARM GCC**: compilador cruzado que genera código para el RP2040 (arquitectura ARM Cortex-M0+)
+  desde Windows. Sin él no se puede compilar el firmware.
+- **CMake**: sistema de build que lee el `CMakeLists.txt` y genera los ficheros de compilación.
+- **Ninja**: ejecutor de builds rápido, invocado por CMake para compilar en paralelo.
 
----
-
-### 4. Extensión Raspberry Pi Pico y descarga del SDK
-
-Esta extensión es la pieza clave para compilar el firmware. Se encarga de descargar
-automáticamente el compilador ARM, el SDK de Pico, CMake y Ninja — no hay que
-instalar ninguna de estas herramientas por separado.
-
-**Instalación de la extensión:**
-1. Con VS Code abierto, ve a la pestaña de **Extensiones** en la barra lateral izquierda
-   (icono de cuatro cuadrados, o atajo `Ctrl+Shift+X`)
-2. En el buscador escribe: `Raspberry Pi Pico`
-3. Aparecerá la extensión con autor **Raspberry Pi**. Haz clic en **Install**.
-4. Espera a que se instale (unos segundos).
-
-**Descarga del SDK y herramientas:**
-
-Tras instalar la extensión, aparece un icono de Raspberry Pi en la barra lateral
-izquierda de VS Code. Haz clic en él. La extensión iniciará la descarga del SDK y
-las herramientas en segundo plano. El progreso aparece en la barra de estado inferior
-de VS Code. **La primera descarga puede tardar varios minutos** dependiendo de la
-velocidad de conexión a internet.
-
-Las herramientas se instalan en `C:\Users\<tu_usuario>\.pico-sdk\`:
-
-| Carpeta | Contenido | Versión |
-|---------|-----------|---------|
-| `.pico-sdk\sdk\2.2.0\` | Pico SDK (cabeceras y librerías) | 2.2.0 |
-| `.pico-sdk\toolchain\14_2_Rel1\` | ARM GCC (compilador cruzado para RP2040) | 14.2 |
-| `.pico-sdk\cmake\v3.31.5\` | CMake (sistema de build) | 3.31.5 |
-| `.pico-sdk\ninja\v1.12.1\` | Ninja (ejecutor de builds) | 1.12.1 |
-
-**Verificar que la descarga se completó:**
-Comprueba que existe el archivo:
+**Instalación desde CMD con winget:**
+```cmd
+winget install Arm.GnuArmEmbeddedToolchain --accept-source-agreements --accept-package-agreements
+winget install Kitware.CMake --accept-source-agreements --accept-package-agreements
+winget install Ninja-build.Ninja --accept-source-agreements --accept-package-agreements
 ```
-C:\Users\<tu_usuario>\.pico-sdk\toolchain\14_2_Rel1\bin\arm-none-eabi-gcc.exe
+
+**Verificar** (en un CMD nuevo — importante abrir uno nuevo para que el PATH se actualice):
+```cmd
+arm-none-eabi-gcc --version
+cmake --version
+ninja --version
 ```
-Si no existe, abre el panel de la extensión (icono Raspberry Pi en la barra lateral)
-y busca la opción **"Switch SDK version"** o **"Install SDK"** para forzar la descarga.
 
 ---
 
-### 5. Visual Studio 2022 (solo para la DLL)
+### 4. Visual Studio 2022 o 2026 (Community)
 
-Visual Studio 2022 es necesario para compilar la DLL. La DLL usa la API Win32 de bajo
-nivel (`SetupDI`, `CreateFile`, overlapped I/O) que requiere el compilador MSVC de
-Microsoft. **MinGW o GCC no son compatibles.**
+Visual Studio es necesario por dos motivos:
+
+1. **Para compilar la DLL**: la DLL usa la API Win32 de bajo nivel (`SetupDI`, `CreateFile`,
+   overlapped I/O) que requiere el compilador MSVC de Microsoft. MinGW o GCC no son compatibles.
+
+2. **Para compilar el firmware la primera vez**: durante la primera compilación, el SDK
+   necesita construir dos herramientas auxiliares para Windows (`pioasm` y `picotool`)
+   que también requieren un compilador C++ nativo. En compilaciones posteriores ya no hace
+   falta porque esas herramientas quedan compiladas en la carpeta `build\`.
 
 **Instalación:**
 1. Ve a [https://visualstudio.microsoft.com/es/vs/community/](https://visualstudio.microsoft.com/es/vs/community/)
-2. Haz clic en **"Descargar Community 2022"** (gratuito)
-3. Ejecuta el instalador (`vs_community.exe`). El instalador descargará primero el
-   propio Visual Studio Installer (~5 MB) y luego mostrará la pantalla de cargas de trabajo.
-4. En la pantalla de **"Cargas de trabajo"**, marca **"Desarrollo de escritorio con C++"**.
+2. Descarga e instala Visual Studio Community (versión 2022 o 2026, ambas válidas)
+3. En la pantalla de cargas de trabajo, marca **"Desarrollo de escritorio con C++"**
 
    Esto instala automáticamente:
-   - Compilador MSVC v143 (`cl.exe`) — el compilador C/C++ de Microsoft
+   - Compilador MSVC (`cl.exe`) — el compilador C/C++ de Microsoft
    - Linker (`link.exe`)
-   - Windows SDK 10 — cabeceras y librerías de la API de Windows
-   - CMake integrado en VS 2022 — no hace falta instalar CMake por separado para la DLL
-   - Herramientas de diagnóstico y depuración
+   - Windows SDK — cabeceras y librerías de la API de Windows
 
-5. Haz clic en **"Instalar"** en la esquina inferior derecha.
-   La instalación ocupa aproximadamente **6 GB** en disco y puede tardar 15-30 minutos
-   según la velocidad de la conexión.
-
-> **CMake para la DLL:** VS 2022 incluye CMake 3.x en su ruta de instalación.
-> Cuando compilas la DLL usando el "Developer Command Prompt for VS 2022", CMake
-> ya está disponible en el PATH automáticamente, sin instalarlo por separado.
+4. Haz clic en **"Instalar"** (~6 GB, 15-30 minutos)
 
 ---
 
 ## Clonar el repositorio
 
-Abre un CMD o PowerShell y ejecuta:
+Abre un CMD en la carpeta donde quieras guardar el proyecto y ejecuta:
 
 ```cmd
-git clone <url-del-repo>
+git clone https://github.com/AlvaroSacristandeFrutos/Firmware--Pico-JTAG-TFG.git jlink-pico-probe
 cd jlink-pico-probe
+git checkout development
 ```
 
-Esto descarga el código fuente completo del repositorio en una carpeta llamada
-`jlink-pico-probe`.
+Todos los comandos de compilación del resto de este documento se ejecutan desde
+la raíz del repositorio (`jlink-pico-probe\`) salvo que se indique lo contrario.
+
+> **Nota:** el repositorio incluye las carpetas `build\` y `dll\build64\` con la caché
+> de CMake generada en la máquina de desarrollo original. Si al configurar CMake aparece
+> el error `CMakeCache.txt directory mismatch`, borra la carpeta de build correspondiente
+> antes de reconfigurar:
+> ```cmd
+> rmdir /s /q build        ← para el firmware
+> rmdir /s /q dll\build64  ← para la DLL
+> ```
+
+---
+
+## Descargar el SDK de Pico
+
+El SDK de Pico contiene las cabeceras y librerías necesarias para compilar el firmware.
+Se descarga manualmente con git en dos pasos: primero el SDK principal, luego sus submódulos.
+
+**Paso 1 — Clonar el SDK:**
+```cmd
+git clone https://github.com/raspberrypi/pico-sdk.git %USERPROFILE%\.pico-sdk\sdk\2.2.0 --branch 2.2.0 --depth 1
+```
+
+**Paso 2 — Inicializar los submódulos:**
+```cmd
+cd %USERPROFILE%\.pico-sdk\sdk\2.2.0
+git -c submodule."lib/mbedtls".update=none submodule update --init --depth 1
+```
+
+> El SDK usa submódulos para librerías externas (TinyUSB, lwIP, etc.). Se excluye
+> `lib/mbedtls` (criptografía) porque este proyecto no la usa y su descarga es
+> propensa a fallos de red. Si el comando falla por problemas de conexión, simplemente
+> vuelve a ejecutarlo — git retoma desde donde se quedó sin descargar de cero.
+
+Vuelve a la raíz del repositorio cuando termine:
+```cmd
+cd <ruta donde clonaste jlink-pico-probe>
+```
 
 ---
 
 ## Compilar el firmware
 
-### Opción A — Desde VS Code (recomendado)
+### Primera vez
 
-Esta es la forma más sencilla. La extensión Raspberry Pi Pico gestiona CMake y Ninja
-de forma transparente.
+La primera compilación configura CMake (genera la caché en `build\`) y compila también
+las herramientas auxiliares `pioasm` y `picotool`. Por eso requiere MSVC disponible en
+el PATH, lo que se consigue abriendo el **Símbolo del sistema para desarrolladores**
+(búscalo en el menú Inicio como "Símbolo del sistema para desarrolladores de Visual Studio").
 
-1. En VS Code: **File → Open Folder** → selecciona la carpeta `jlink-pico-probe`
-   (la carpeta raíz del repositorio, donde está el `CMakeLists.txt`)
-
-2. VS Code abre el proyecto. La extensión Raspberry Pi Pico detecta el `CMakeLists.txt`
-   y muestra en la **barra de estado inferior** (barra azul en la parte baja de VS Code)
-   el texto **"Pico SDK 2.2.0"** o similar. Si no aparece enseguida, espera unos segundos
-   o pulsa `Ctrl+Shift+P` → "Reload Window".
-
-3. La primera vez que abres el proyecto, la extensión lo **configura automáticamente**
-   (crea la carpeta `build\` con la caché de CMake). Esto puede tardar 1-2 minutos
-   porque el SDK compila algunas de sus librerías internas. Verás actividad en el
-   terminal de salida de VS Code.
-
-4. Cuando la configuración termine, haz clic en el botón **"Compile"** de la barra
-   de estado inferior.
-   También puedes usar: `Ctrl+Shift+P` → "Raspberry Pi Pico: Compile Project".
-
-5. La compilación tarda unos segundos. El resultado estará en:
-   ```
-   build\jlink_pico_probe.uf2
-   ```
-
-> **Sobre la caché de CMake:** la carpeta `build\` contiene la caché de CMake
-> (`build\CMakeCache.txt`). Esta caché recuerda la ruta del SDK, el compilador y
-> los parámetros de configuración. **No hace falta borrarla ni gestionarla.**
-> En compilaciones posteriores, la extensión simplemente recompila los archivos
-> modificados. Solo si cambias la versión del SDK o la configuración necesitarías
-> borrar `build\` y reconfiguar.
-
-### Opción B — Desde CMD
-
-Si no tienes VS Code o prefieres la línea de comandos:
+Desde el **Símbolo del sistema para desarrolladores**, en la raíz del repositorio:
 
 ```cmd
-REM Añadir las herramientas del SDK al PATH de esta sesión
-set TOOLS=%USERPROFILE%\.pico-sdk
-set PATH=%TOOLS%\cmake\v3.31.5\bin;%TOOLS%\ninja\v1.12.1;%TOOLS%\toolchain\14_2_Rel1\bin;%PATH%
-
-REM Ir a la raíz del repositorio
-cd jlink-pico-probe
-
-REM Configurar el proyecto (solo la primera vez — crea la carpeta build\)
-cmake -B build -G Ninja ^
-  -DPICO_SDK_PATH=%TOOLS%\sdk\2.2.0 ^
-  -DCMAKE_TOOLCHAIN_FILE=%TOOLS%\sdk\2.2.0\cmake\preload\toolchains\pico_arm_cortex_m0plus_gcc.cmake
-
-REM Compilar
-cmake --build build --target jlink_pico_probe
+cmake -B build -G Ninja -DPICO_SDK_PATH=%USERPROFILE%\.pico-sdk\sdk\2.2.0
+cmake --build build
 ```
 
 Resultado: `build\jlink_pico_probe.uf2`
 
-> En compilaciones posteriores solo es necesario ejecutar `cmake --build build`.
-> El paso de configuración (`cmake -B build ...`) solo se necesita una vez.
+> La primera compilación puede tardar varios minutos porque CMake descarga y compila
+> `picotool` automáticamente desde internet.
+
+### Compilaciones posteriores
+
+Una vez configurado, solo se recompilan los archivos modificados. Ya **no hace falta**
+el Símbolo del sistema para desarrolladores — funciona desde un CMD normal:
+
+```cmd
+cmake --build build
+```
+
+> Solo necesitas repetir el paso de configuración (`cmake -B build ...`) si borras
+> la carpeta `build\` o cambias la versión del SDK.
 
 ---
 
 ## Compilar la DLL
 
-La DLL se compila desde la subcarpeta `dll\` del repositorio, **usando el Developer
-Command Prompt de VS 2022** (no un CMD normal), que tiene MSVC en el PATH:
+La DLL siempre requiere MSVC, por lo que **siempre** se compila desde el
+**Símbolo del sistema para desarrolladores**.
 
-1. Busca **"Developer Command Prompt for VS 2022"** en el menú Inicio de Windows
-   y ábrelo. Es un CMD especial que configura automáticamente todas las variables
-   de entorno necesarias para MSVC.
+### Primera vez
 
-2. Navega hasta la carpeta `dll\` del repositorio:
-   ```cmd
-   cd C:\ruta\hasta\jlink-pico-probe\dll
-   ```
+El generador CMake depende de la versión de Visual Studio instalada:
 
-3. Configura el proyecto (solo la primera vez):
-   ```cmd
-   cmake -B build64 -G "Visual Studio 17 2022" -A x64
-   ```
-   - `-B build64`: crea y usa la carpeta `build64\` como directorio de build
-   - `-G "Visual Studio 17 2022"`: usa el generador de VS 2022
-   - `-A x64`: compila para 64 bits
+**Con Visual Studio 2022:**
+```cmd
+cd dll
+cmake -B build64 -G "Visual Studio 17 2022" -A x64
+cmake --build build64 --config Release
+```
 
-4. Compila:
-   ```cmd
-   cmake --build build64 --config Release
-   ```
-   - `--config Release`: compilación optimizada (sin símbolos de depuración)
+**Con Visual Studio 2026:**
+```cmd
+cd dll
+cmake -B build64 -G "Visual Studio 18 2026" -A x64
+cmake --build build64 --config Release
+```
 
 Resultado: `dll\build64\Release\JLink_x64.dll`
+
+### Compilaciones posteriores
+
+Desde el **Símbolo del sistema para desarrolladores**, en la carpeta `dll\`:
+```cmd
+cmake --build build64 --config Release
+```
 
 ### DLL de 32 bits (opcional)
 
 Si se necesita una versión de 32 bits (`JLinkARM.dll`):
+
+**VS 2022:**
 ```cmd
 cmake -B build32 -G "Visual Studio 17 2022" -A Win32 -DBUILD_ARM=1
 cmake --build build32 --config Release
 ```
+
+**VS 2026:**
+```cmd
+cmake -B build32 -G "Visual Studio 18 2026" -A Win32 -DBUILD_ARM=1
+cmake --build build32 --config Release
+```
+
 Resultado: `dll\build32\Release\JLinkARM.dll`
 
 ### Desplegar la DLL
 
-Para que una aplicación use nuestra DLL, basta con copiarla al mismo directorio
-que el ejecutable de la aplicación:
+Para que una aplicación use nuestra DLL, cópiala al mismo directorio que el ejecutable:
 
 ```cmd
 copy dll\build64\Release\JLink_x64.dll <directorio_del_ejecutable>\
