@@ -1,13 +1,13 @@
 # jlink-pico-probe
 
 Firmware bare-metal para **Raspberry Pi Pico (RP2040)** que implementa el protocolo
-**PicoAdapter** — una sonda JTAG de bajo coste para boundary scan y depuración.
+**PicoAdapter**, una sonda JTAG de bajo coste para boundary scan y depuración.
 La capa USB es completamente bare-metal (sin TinyUSB).
 
 El repositorio incluye también una **DLL de Windows** (`JLink_x64.dll`) que se hace
 pasar por la DLL oficial de SEGGER, lo que permite que cualquier software compatible
 con J-Link (como nuestro JtagScannerQt) funcione con la sonda **sin ningún cambio** en el
-código de la aplicación — simplemente poniendo nuestra DLL en el directorio del ejecutable.
+código de la aplicación, simplemente poniendo nuestra DLL en el directorio del ejecutable.
 
 ---
 
@@ -34,7 +34,7 @@ El proyecto está formado por dos componentes:
 El firmware convierte la Pico en una sonda JTAG. Al conectarla al PC por USB,
 Windows la reconoce automáticamente como un puerto COM virtual (sin drivers adicionales)
 usando el VID/PID de Raspberry Pi (`2E8A:000A`). La comunicación entre el PC y la sonda
-usa el **protocolo PicoAdapter** — un formato de trama serie propio:
+usa el **protocolo PicoAdapter**, un formato de trama serie propio:
 
 ```
 [0xA5] [CMD] [LEN_LO] [LEN_HI] [PAYLOAD...] [CRC8]
@@ -55,13 +55,13 @@ en lugar de hablar con hardware SEGGER, abre el puerto COM virtual de la Pico y
 traduce las llamadas al protocolo PicoAdapter.
 
 Para usar la sonda basta con **copiar nuestra `JLink_x64.dll` al directorio del ejecutable**
-de la aplicación — sin modificar el código de la aplicación.
+de la aplicación, sin modificar el código de la aplicación.
 
 ```
 JtagScannerQt.exe       ← aplicación sin modificar
 JLink_x64.dll           ← nuestra DLL (reemplaza a la de SEGGER)
       │
-      │  USB-CDC (puerto COM virtual) — protocolo PicoAdapter
+      │  USB-CDC (puerto COM virtual), protocolo PicoAdapter
       ▼
 Raspberry Pi Pico
       │  JTAG: TDI (GP16), TDO (GP17), TCK (GP18), TMS (GP19)
@@ -121,7 +121,7 @@ git --version
 ### 2. Python 3.13
 
 El SDK de Pico necesita Python para generar el código de arranque del procesador
-durante la compilación. No se usa para programar — es una dependencia interna del build.
+durante la compilación. No se usa para programar, es una dependencia interna del build.
 
 > **Importante:** instala la versión **3.13 estable**. Python 3.14 (pre-release) no es
 > compatible con la versión de CMake del SDK.
@@ -161,7 +161,7 @@ winget install Kitware.CMake --accept-source-agreements --accept-package-agreeme
 winget install Ninja-build.Ninja --accept-source-agreements --accept-package-agreements
 ```
 
-**Verificar** (en un CMD nuevo — importante abrir uno nuevo para que el PATH se actualice):
+**Verificar** (en un CMD nuevo, importante abrir uno nuevo para que el PATH se actualice):
 ```cmd
 arm-none-eabi-gcc --version
 cmake --version
@@ -188,9 +188,9 @@ Visual Studio es necesario por dos motivos:
 3. En la pantalla de cargas de trabajo, marca **"Desarrollo de escritorio con C++"**
 
    Esto instala automáticamente:
-   - Compilador MSVC (`cl.exe`) — el compilador C/C++ de Microsoft
+   - Compilador MSVC (`cl.exe`), el compilador C/C++ de Microsoft
    - Linker (`link.exe`)
-   - Windows SDK — cabeceras y librerías de la API de Windows
+   - Windows SDK, cabeceras y librerías de la API de Windows
 
 4. Haz clic en **"Instalar"** (~6 GB, 15-30 minutos)
 
@@ -225,12 +225,12 @@ la raíz del repositorio (`jlink-pico-probe\`) salvo que se indique lo contrario
 El SDK de Pico contiene las cabeceras y librerías necesarias para compilar el firmware.
 Se descarga manualmente con git en dos pasos: primero el SDK principal, luego sus submódulos.
 
-**Paso 1 — Clonar el SDK:**
+**Paso 1, Clonar el SDK:**
 ```cmd
 git clone https://github.com/raspberrypi/pico-sdk.git %USERPROFILE%\.pico-sdk\sdk\2.2.0 --branch 2.2.0 --depth 1
 ```
 
-**Paso 2 — Inicializar los submódulos:**
+**Paso 2, Inicializar los submódulos:**
 ```cmd
 cd %USERPROFILE%\.pico-sdk\sdk\2.2.0
 git -c submodule."lib/mbedtls".update=none submodule update --init --depth 1
@@ -239,7 +239,7 @@ git -c submodule."lib/mbedtls".update=none submodule update --init --depth 1
 > El SDK usa submódulos para librerías externas (TinyUSB, lwIP, etc.). Se excluye
 > `lib/mbedtls` (criptografía) porque este proyecto no la usa y su descarga es
 > propensa a fallos de red. Si el comando falla por problemas de conexión, simplemente
-> vuelve a ejecutarlo — git retoma desde donde se quedó sin descargar de cero.
+> vuelve a ejecutarlo, git retoma desde donde se quedó sin descargar de cero.
 
 Vuelve a la raíz del repositorio cuando termine:
 ```cmd
@@ -272,7 +272,7 @@ Resultado: `build\jlink_pico_probe.uf2`
 ### Compilaciones posteriores
 
 Una vez configurado, solo se recompilan los archivos modificados. Ya **no hace falta**
-el Símbolo del sistema para desarrolladores — funciona desde un CMD normal:
+el Símbolo del sistema para desarrolladores, funciona desde un CMD normal:
 
 ```cmd
 cmake --build build
@@ -315,24 +315,6 @@ Desde el **Símbolo del sistema para desarrolladores**, en la carpeta `dll\`:
 cmake --build build64 --config Release
 ```
 
-### DLL de 32 bits (opcional)
-
-Si se necesita una versión de 32 bits (`JLinkARM.dll`):
-
-**VS 2022:**
-```cmd
-cmake -B build32 -G "Visual Studio 17 2022" -A Win32 -DBUILD_ARM=1
-cmake --build build32 --config Release
-```
-
-**VS 2026:**
-```cmd
-cmake -B build32 -G "Visual Studio 18 2026" -A Win32 -DBUILD_ARM=1
-cmake --build build32 --config Release
-```
-
-Resultado: `dll\build32\Release\JLinkARM.dll`
-
 ### Desplegar la DLL
 
 Para que una aplicación use nuestra DLL, cópiala al mismo directorio que el ejecutable:
@@ -353,7 +335,7 @@ bootloader de fábrica que aparece como unidad USB al mantener pulsado BOOTSEL.
 
 **Pasos:**
 1. **Desconecta** el Pico del USB si estaba conectado.
-2. **Mantén pulsado el botón BOOTSEL** — es el botón blanco pequeño en la placa Pico.
+2. **Mantén pulsado el botón BOOTSEL**, es el botón blanco pequeño en la placa Pico.
 3. **Sin soltar BOOTSEL**, conecta el cable USB al PC.
 4. **Suelta BOOTSEL**. En el explorador de archivos de Windows aparecerá una nueva
    unidad de disco llamada **RPI-RP2** (como si fuera un pendrive).
