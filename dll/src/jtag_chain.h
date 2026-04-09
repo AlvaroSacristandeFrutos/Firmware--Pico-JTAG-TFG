@@ -13,20 +13,20 @@
 
 /* ---- Clasificación de vectores TMS ---- */
 typedef enum {
-    TMS_ALL_ZERO,   /* Todos los bits de TMS son 0 → CMD_SHIFT_DATA (exitShift=0) */
-    TMS_NAV_ONLY,   /* Secuencia de navegación TAP pura (TDI irrelevante) → CMD_WRITE_TMS */
-    TMS_MIXED,      /* TMS y TDI entrelazados (raro) → bit-a-bit */
+    TMS_ALL_ZERO,   /* Todos los bits de TMS son 0 → CMD_SHIFT_DATA (exit=false) */
+    TMS_NAV_ONLY,   /* N-1 bits TMS=0 + último bit TMS=1 → CMD_SHIFT_DATA (exit=true) */
+    TMS_MIXED,      /* Cualquier otro patrón de TMS → bitbang bit a bit */
 } tms_class_t;
 
 /*
  * Clasifica el vector TMS de numBits bits.
  *
  * TMS_ALL_ZERO  → TMS[0..N-1] todos 0.
- * TMS_NAV_ONLY  → al menos un TMS=1, pero TDI es irrelevante (solo navega el TAP).
- *                 En la práctica: usamos este cuando TDI=0xFF...FF (capture) o no importa.
- *                 Simplificación: si TMS != TODO_CEROS, se clasifica NAV_ONLY o MIXED
- *                 según si los bits TDI son todos iguales (0 o 1).
- * TMS_MIXED     → tanto TMS como TDI tienen variación → bit-a-bit.
+ * TMS_NAV_ONLY  → exactamente los N-1 primeros bits son 0 y el último es 1.
+ *                 Este patrón cubre el caso más habitual: desplazamiento de datos
+ *                 seguido de transición a Exit1-DR/IR en el último bit.
+ * TMS_MIXED     → cualquier otro patrón (TMS=1 en posiciones intermedias) →
+ *                 requiere bitbang bit a bit para mantener TDI correcto.
  */
 tms_class_t classify_tms(const uint8_t *pTMS, uint32_t numBits);
 

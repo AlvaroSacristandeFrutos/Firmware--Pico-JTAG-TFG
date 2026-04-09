@@ -21,8 +21,10 @@
  *   Shift-IR/DR ─TMS=1─► Exit1 ─TMS=1─► Update ─TMS=0─► RTI
  */
 
-/* Buffer de TDI=0 para navegación sin datos */
-static const uint8_t k_zeros[64] = {0};
+/* Buffer de TDI=0 para navegación sin datos.
+ * Tamaño = 1022 bytes = 8176 bits, igual al límite máximo del motor PIO+DMA,
+ * de modo que pulse_tck() no haga más transferencias DMA de las necesarias. */
+static const uint8_t k_zeros[1022] = {0};
 
 static void tms_set(bool level) {
     if (level)
@@ -34,7 +36,7 @@ static void tms_set(bool level) {
 /* Generar n pulsos de TCK con TMS al nivel previamente fijado */
 static void pulse_tck(uint32_t n) {
     while (n > 0u) {
-        uint32_t chunk = (n > 512u) ? 512u : n;
+        uint32_t chunk = (n > 8176u) ? 8176u : n;
         jtag_pio_write(k_zeros, chunk);
         n -= chunk;
     }

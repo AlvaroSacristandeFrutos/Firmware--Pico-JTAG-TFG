@@ -18,31 +18,6 @@
 
 #pragma comment(lib, "setupapi.lib")
 
-/* ---------------------------------------------------------------------- */
-/*  Handshake                                                              */
-/* ---------------------------------------------------------------------- */
-
-static bool do_handshake_t(HANDLE h, uint32_t timeout_ms) {
-    uint8_t  resp;
-    uint8_t  payload[PICO_MAX_PAYLOAD];
-    uint16_t len;
-
-    if (!pico_send(h, CMD_PING, NULL, 0))                return false;
-    if (!pico_recv(h, &resp, payload, &len, timeout_ms)) return false;
-    if (resp != RESP_OK)                                 return false;
-
-    if (!pico_send(h, CMD_GET_VERSION, NULL, 0))         return false;
-    if (!pico_recv(h, &resp, payload, &len, timeout_ms)) return false;
-    if (resp != RESP_DATA || len < 11u)                  return false;
-    if (strncmp((char *)payload, "PicoAdapter", 11) != 0) return false;
-
-    return true;
-}
-
-static bool do_handshake(HANDLE h) {
-    return do_handshake_t(h, 50u);
-}
-
 /* forward declaration */
 static bool try_port_overlapped(const char *port_name,
                                 char *out_port, size_t out_size);

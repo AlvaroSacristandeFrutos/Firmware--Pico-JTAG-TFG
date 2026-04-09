@@ -123,6 +123,13 @@ const char * __cdecl JLINKARM_OpenEx(const char *log, void *reserved) {
             g_hUART = pico_port_open_uart(uart_port);
     }
 
+    /* Guardar el puerto en la caché para que EMU_GetList lo devuelva correctamente */
+    strncpy(s_cached_port, port, sizeof(s_cached_port) - 1);
+    s_cached_port[sizeof(s_cached_port) - 1] = '\0';
+    s_cache_serial = g_serial;
+    s_cache_tick   = GetTickCount();
+    s_cache_found  = 1;
+
     g_is_open = 1;
     return NULL;   /* NULL = éxito, igual que SEGGER */
 }
@@ -176,8 +183,10 @@ uint32_t __cdecl JLINKARM_EMU_GetList(uint32_t mask,
             /* Detección real */
             found = pico_detect(port, sizeof(port)) ? 1 : 0;
 
-            /* Derivar S/N del nombre del puerto (mismo algoritmo que JLINKARM_OpenEx) */
-            if (found && s_cache_serial == 0u) {
+            /* Derivar S/N del nombre del puerto (mismo algoritmo que JLINKARM_OpenEx).
+             * Siempre se recalcula a partir del puerto detectado para evitar que un
+             * serial de caché stale se propague si el dispositivo cambió de puerto. */
+            if (found) {
                 uint32_t hv = 2166136261u;
                 for (const char *p = port; *p; p++) {
                     hv ^= (uint8_t)*p;
@@ -186,7 +195,7 @@ uint32_t __cdecl JLINKARM_EMU_GetList(uint32_t mask,
                 serial = hv % 1000000000u;
                 if (serial == 0u) serial = 1u;
             } else {
-                serial = s_cache_serial;
+                serial = 0u;
             }
 
             /* Actualizar caché */
@@ -489,15 +498,9 @@ int __cdecl JLINKARM_JTAG_StoreGetRaw(const uint8_t *pTDI,
         break;
 
     case TMS_NAV_ONLY: {
-        uint32_t last    = numBits - 1u;
-        bool exit_bit    = (bool)((pTMS[last >> 3u] >> (last & 7u)) & 1u);
-        bool simple      = true;
-        for (uint32_t i = 0u; i < last && simple; i++) {
-            if ((pTMS[i >> 3u] >> (i & 7u)) & 1u) simple = false;
-        }
-        ret = simple
-            ? (jtag_shift_data(pTDI, pTDO, numBits, exit_bit) ? 0 : -1)
-            : (jtag_store_raw_bitbang(pTDI, pTDO, pTMS, numBits) ? 0 : -1);
+        /* classify_tms garantiza: N-1 bits TMS=0 + último bit TMS=1.
+         * Usar shift_data(exit=true) directamente — la re-comprobación es redundante. */
+        ret = jtag_shift_data(pTDI, pTDO, numBits, true) ? 0 : -1;
         break;
     }
 
@@ -538,8 +541,6 @@ uint32_t __cdecl JLINKARM_JTAG_GetU32(void) {
 
 void __cdecl JLINKARM_JTAG_SendNBytes(int n, const uint8_t *pData) {
     if (!g_is_open || n <= 0) return;
-    static const uint8_t zeros[PICO_MAX_PAYLOAD / 8 + 1];
-    (void)zeros;
     jtag_shift_data(pData, NULL, (uint32_t)(n * 8), false);
 }
 
