@@ -101,21 +101,18 @@ const char * __cdecl JLINKARM_OpenEx(const char *log, void *reserved) {
     if (g_hCOM == INVALID_HANDLE_VALUE)
         return "Cannot open COM port";
 
-    /* Leer número de serie a partir del string de versión del firmware.
-     * Usamos los primeros 9 dígitos del hash FNV-1a del nombre del puerto
-     * como identificador único reproducible. */
+    /* Derivar número de serie único a partir del nombre del puerto COM.
+     * Dos dispositivos en puertos distintos reciben seriales distintos.
+     * El mismo dispositivo siempre obtiene el mismo serial mientras Windows
+     * le asigna el mismo número de COM. */
     {
-        uint8_t  rx[PICO_MAX_PAYLOAD];
-        uint16_t rx_len = 0u;
-        if (pico_transact(g_hCOM, CMD_GET_VERSION, NULL, 0u, rx, &rx_len, 500u)) {
-            /* Derivar serial: hash simple del string recibido */
-            uint32_t h = 2166136261u;
-            for (uint16_t i = 0u; i < rx_len; i++) {
-                h ^= rx[i];
-                h *= 16777619u;
-            }
-            g_serial = h % 1000000000u;
+        uint32_t h = 2166136261u;
+        for (const char *p = port; *p; p++) {
+            h ^= (uint8_t)*p;
+            h *= 16777619u;
         }
+        g_serial = h % 1000000000u;
+        if (g_serial == 0u) g_serial = 1u;   /* 0 indica "no detectado" en SEGGER API */
     }
 
     /* Abrir el segundo COM (puente UART transparente, MI_02).
@@ -179,27 +176,15 @@ uint32_t __cdecl JLINKARM_EMU_GetList(uint32_t mask,
             /* Detección real */
             found = pico_detect(port, sizeof(port)) ? 1 : 0;
 
-            /* Si encontramos el puerto, leer el S/N via GET_VERSION */
+            /* Derivar S/N del nombre del puerto (mismo algoritmo que JLINKARM_OpenEx) */
             if (found && s_cache_serial == 0u) {
-                HANDLE h = pico_port_open(port);
-                if (h != INVALID_HANDLE_VALUE) {
-                    uint8_t  rx[256];
-                    uint16_t rx_len = 0u;
-                    if (pico_transact(h, CMD_GET_VERSION, NULL, 0u,
-                                      rx, &rx_len, 500u)) {
-                        uint32_t hv = 2166136261u;
-                        for (uint16_t i = 0u; i < rx_len; i++) {
-                            hv ^= rx[i];
-                            hv *= 16777619u;
-                        }
-                        serial = hv % 1000000000u;
-                    } else {
-                        serial = 0u;
-                    }
-                    pico_port_close(h);
-                } else {
-                    serial = 0u;
+                uint32_t hv = 2166136261u;
+                for (const char *p = port; *p; p++) {
+                    hv ^= (uint8_t)*p;
+                    hv *= 16777619u;
                 }
+                serial = hv % 1000000000u;
+                if (serial == 0u) serial = 1u;
             } else {
                 serial = s_cache_serial;
             }
@@ -349,9 +334,16 @@ int __cdecl JLINKARM_JTAG_StoreRaw(const uint8_t *pTDI,
         break;
     }
 
-    /* Actualizar el estado TAP rastreado */
-    tap_track_tms(pTMS, numBits);
-    g_tap_state = tap_track_state();
+    if (ret != 0) {
+        /* Fallo en la operación: estado TAP del hardware desconocido.
+         * Forzar TAP_RESET en el tracker para que la siguiente llamada
+         * sepa que necesita un reset TAP explícito antes de continuar. */
+        tap_track_reset();
+        g_tap_state = TAP_RESET;
+    } else {
+        tap_track_tms(pTMS, numBits);
+        g_tap_state = tap_track_state();
+    }
     return ret;
 }
 
@@ -482,7 +474,12 @@ int __cdecl JLINKARM_JTAG_StoreGetRaw(const uint8_t *pTDI,
             g_tap_state = tap_track_state();
             return ret;
         }
-        /* Cadena demasiado larga para el buffer → caer al path normal */
+        /* Cadena demasiado larga para el buffer de padding (>4096 bytes):
+         * caer al path directo sin bypass. Se pierde la corrección multi-device
+         * pero al menos no se corrompe memoria. */
+        if (g_warn_cb)
+            g_warn_cb("PicoAdapter: bypass padding buffer overflow "
+                      "(cadena JTAG demasiado larga), procesando sin bypass");
     }
 
     /* ---- Path normal (single-device o bypass desactivado) ---- */
@@ -510,8 +507,13 @@ int __cdecl JLINKARM_JTAG_StoreGetRaw(const uint8_t *pTDI,
         break;
     }
 
-    tap_track_tms(pTMS, numBits);
-    g_tap_state = tap_track_state();
+    if (ret != 0) {
+        tap_track_reset();
+        g_tap_state = TAP_RESET;
+    } else {
+        tap_track_tms(pTMS, numBits);
+        g_tap_state = tap_track_state();
+    }
     return ret;
 }
 
@@ -693,20 +695,20 @@ void __cdecl JLINK_PICO_GetVersion(char *pBuf, int bufSize) {
 /*
  * PICO_UART_SetBaud — cambia la velocidad de la UART del target.
  * Llamar antes de enviar/recibir si el target no usa 115200.
+ *
+ * Usa SetCommState sobre g_hUART (COM MI_02, puente transparente EP4).
+ * Windows envía automáticamente SET_LINE_CODING al firmware CDC, que llama
+ * uart_driver_set_baud() en ep0_out_handler. Así el DCB de Windows y el
+ * hardware quedan siempre sincronizados.
  */
 void __cdecl PICO_UART_SetBaud(uint32_t baud) {
-    if (!g_is_open) return;
-    uint8_t pl[4] = {
-        (uint8_t)( baud        & 0xFFu),
-        (uint8_t)((baud >>  8) & 0xFFu),
-        (uint8_t)((baud >> 16) & 0xFFu),
-        (uint8_t)((baud >> 24) & 0xFFu)
-    };
-    uint8_t  resp;
-    uint8_t  buf[4];
-    uint16_t rlen;
-    if (pico_send(g_hCOM, CMD_UART_SET_BAUD, pl, 4u))
-        pico_recv(g_hCOM, &resp, buf, &rlen, 200u);
+    if (g_hUART == INVALID_HANDLE_VALUE || baud == 0u) return;
+    DCB dcb;
+    dcb.DCBlength = sizeof(DCB);
+    if (GetCommState(g_hUART, &dcb)) {
+        dcb.BaudRate = (DWORD)baud;
+        SetCommState(g_hUART, &dcb);
+    }
 }
 
 /*

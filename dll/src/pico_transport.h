@@ -31,9 +31,10 @@
 #define CMD_GET_HW_VERSION  0x12u
 #define CMD_GET_CLOCK       0x13u
 #define CMD_SELECT_IF       0x14u
-#define CMD_UART_SET_BAUD   0x20u   /* [u32 LE Hz]  → RESP_OK   */
-#define CMD_UART_SEND       0x21u   /* [N bytes]    → RESP_OK   */
-#define CMD_UART_RECV       0x22u   /* []           → RESP_DATA */
+/* CMD_UART_SET_BAUD (0x20), CMD_UART_SEND (0x21) y CMD_UART_RECV (0x22) eliminados.
+ * El baudrate se cambia vía SetCommState sobre el COM MI_02 (g_hUART),
+ * que dispara SET_LINE_CODING al firmware. Los datos se envían/reciben
+ * directamente sobre ese COM transparente sin protocolo PicoAdapter. */
 
 /* ---- Tipos de respuesta ---- */
 #define RESP_OK             0x80u

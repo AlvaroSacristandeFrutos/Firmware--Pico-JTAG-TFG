@@ -18,8 +18,6 @@
 #include "adc.h"             /* adc_read_vref_mv() */
 #include "board_config.h"    /* PIN_RST, PIN_TRST */
 #include "led.h"             /* led_red_set() */
-#include "uart/uart_driver.h" /* uart_driver_set_baud(), uart_driver_send(), uart_driver_recv() */
-
 #include "hardware/structs/sio.h"
 #include "hardware/watchdog.h"   /* watchdog_update() */
 #include "pico/time.h"    /* busy_wait_us_32() */
@@ -225,10 +223,11 @@ static void handle_write_tms(const uint8_t *payload, uint16_t len) {
      * número de transacciones DMA de N (bits) a K (transiciones TMS),
      * que en JTAG típico es O(comandos) en lugar de O(bits).
      *
-     * Buffer de ceros para TDI: 64 bytes = 512 bits por llamada DMA.
-     * jtag_pio_write() ya fragmenta internamente en chunks de 512 bits.
+     * Buffer de ceros para TDI: 1022 bytes = 8176 bits = máximo del DMA RX.
+     * Reside en flash (.rodata), sin coste en RAM.
+     * Un único DMA cubre la mayoría de las secuencias TMS reales.
      */
-    static const uint8_t k_zeros[64] = {0u};
+    static const uint8_t k_zeros[1022] = {0u};
 
     uint16_t i = 0u;
     while (i < num_bits) {
@@ -237,7 +236,7 @@ static void handle_write_tms(const uint8_t *payload, uint16_t len) {
 
         /* Contar cuántos bits consecutivos comparten el mismo nivel TMS */
         uint16_t run = 1u;
-        while ((i + run) < num_bits && run < 512u) {
+        while ((i + run) < num_bits && run < 8176u) {
             bool next = (bool)((tms_bytes[(i + run) >> 3u] >> ((i + run) & 7u)) & 1u);
             if (next != tms_val) break;
             run++;
@@ -310,7 +309,7 @@ static void handle_reset_hard(const uint8_t *payload, uint16_t len) {
         ? (uint16_t)((uint16_t)payload[0] | ((uint16_t)payload[1] << 8u))
         : 0u;
     if (ms == 0u)    ms = 10u;
-    if (ms > 1000u)  ms = 1000u;   /* cap: no superar la ventana del watchdog (2 s) */
+    if (ms > 5000u)  ms = 5000u;   /* cap: el bucle alimenta el watchdog cada 100 ms, no hay riesgo de reset */
     sio_hw->gpio_clr = (1u << PIN_RST);
     /* Esperar en chunks de 100 ms para alimentar el watchdog entre iteraciones.
      * Necesario porque cdc_rx_task() puede despachar varios RESET_HARD consecutivos
@@ -438,21 +437,6 @@ static void handle_get_status(void) {
 }
 
 /*
- * CMD_UART_SET_BAUD (0x20) — payload: [baud: u32 LE]
- * Cambia la velocidad de UART0 en tiempo de ejecución.
- */
-static void handle_uart_set_baud(const uint8_t *payload, uint16_t len) {
-    if (len < 4u) { send_resp_error(); return; }
-    uint32_t baud = (uint32_t)payload[0]
-                  | ((uint32_t)payload[1] << 8u)
-                  | ((uint32_t)payload[2] << 16u)
-                  | ((uint32_t)payload[3] << 24u);
-    if (baud == 0u) { send_resp_error(); return; }   /* divisor 0 deja la UART en estado inválido */
-    uart_driver_set_baud(baud);
-    send_resp_ok();
-}
-
-/*
  * CMD_SET_LED — payload: [mask: u8]
  *   bit0 = LED verde (GP14): 1=encendido, 0=apagado
  *   bit1 = LED rojo  (GP15): 1=encendido, 0=apagado
@@ -512,9 +496,6 @@ static void dispatch(void) {
     case CMD_SELECT_IF:
         handle_select_if(s_payload, s_len);
         break;
-    case CMD_UART_SET_BAUD:
-        handle_uart_set_baud(s_payload, s_len);
-        break;
     default:
         send_resp_error();
         break;
@@ -567,9 +548,8 @@ void protocol_feed(uint8_t byte) {
         break;
 
     case ST_RECV_PAYLOAD:
-        /* Almacenar solo si cabe en el buffer; siempre actualizar CRC */
-        if (s_recv < (uint16_t)MAX_PAYLOAD)
-            s_payload[s_recv] = byte;
+        /* s_len <= MAX_PAYLOAD está garantizado por ST_WAIT_LEN_HI; s_recv < s_len */
+        s_payload[s_recv] = byte;
         s_crc_acc = crc8_byte(s_crc_acc, byte);
         s_recv++;
         if (s_recv >= s_len)

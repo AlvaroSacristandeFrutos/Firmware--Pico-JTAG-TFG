@@ -297,10 +297,12 @@ bool jtag_pio_write_read_exit(const uint8_t *tdi_buf, uint8_t *tdo_buf,
 }
 
 bool jtag_pio_write(const uint8_t *tdi_buf, uint32_t len_bits) {
-    static uint8_t tdo_discard[64];   /* 512 bits por iteración como máximo */
+    /* Buffer de descarte: mismo tamaño que s_rx_words (1022 bytes = 8176 bits),
+     * que es el máximo que acepta jtag_pio_write_read en una sola llamada DMA. */
+    static uint8_t tdo_discard[1022];
 
     while (len_bits > 0u) {
-        uint32_t chunk_bits  = (len_bits > 512u) ? 512u : len_bits;
+        uint32_t chunk_bits  = (len_bits > 8176u) ? 8176u : len_bits;
         uint32_t chunk_bytes = (chunk_bits + 7u) / 8u;
 
         if (!jtag_pio_write_read(tdi_buf, tdo_discard, chunk_bits))
