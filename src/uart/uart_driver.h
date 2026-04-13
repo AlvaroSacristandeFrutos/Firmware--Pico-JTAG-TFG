@@ -6,10 +6,9 @@
  * La recepción es asíncrona (IRQ-driven) con buffer circular de 512 bytes.
  * La transmisión es bloqueante (usa el FIFO hardware de 32 bytes de UART0).
  *
- * Comandos protocolo PicoAdapter:
- *   CMD_UART_SET_BAUD (0x20) — configura baudrate
- *   CMD_UART_SEND     (0x21) — envía bytes al target
- *   CMD_UART_RECV     (0x22) — lee bytes recibidos del target
+ * El baudrate se configura vía USB SET_LINE_CODING en la interfaz MI_02.
+ * Los datos se intercambian directamente sobre esa interfaz CDC transparente
+ * (EP4 OUT/IN), sin protocolo PicoAdapter.
  */
 
 #include <stdint.h>

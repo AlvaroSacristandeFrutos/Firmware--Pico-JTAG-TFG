@@ -130,6 +130,13 @@ const char * __cdecl JLINKARM_OpenEx(const char *log, void *reserved) {
     s_cache_tick   = GetTickCount();
     s_cache_found  = 1;
 
+    /* Reiniciar el tracker TAP: el hardware arranca en Test-Logic-Reset
+     * (o en el estado en que quedó el target, pero lo tratamos como desconocido).
+     * Sin este reset, un Close+Open en el mismo proceso heredaría el estado TAP
+     * de la sesión anterior y activaría bypass padding erróneamente en StoreGetRaw. */
+    tap_track_reset();
+    g_tap_state = TAP_RESET;
+
     g_is_open = 1;
     return NULL;   /* NULL = éxito, igual que SEGGER */
 }
@@ -146,6 +153,10 @@ void __cdecl JLINKARM_Close(void) {
     if (g_hUART != INVALID_HANDLE_VALUE) {
         pico_port_close(g_hUART);
         g_hUART = INVALID_HANDLE_VALUE;
+    }
+    if (g_log_fp) {
+        fclose(g_log_fp);
+        g_log_fp = NULL;
     }
     g_is_open = 0;
 }
@@ -259,8 +270,9 @@ void __cdecl JLINKARM_SetSpeed(uint32_t khz) {
         (uint8_t)((hz >> 16) & 0xFFu),
         (uint8_t)((hz >> 24) & 0xFFu)
     };
-    pico_transact(g_hCOM, CMD_SET_CLOCK, p, 4u, NULL, NULL, 500u);
-    g_speed_khz = khz;
+    if (pico_transact(g_hCOM, CMD_SET_CLOCK, p, 4u, NULL, NULL, 500u))
+        g_speed_khz = khz;
+    /* Si el firmware rechaza la velocidad (p.ej. hz < 1000), g_speed_khz no se actualiza. */
 }
 
 uint32_t __cdecl JLINKARM_GetSpeed(void) {
@@ -283,9 +295,15 @@ uint32_t __cdecl JLINKARM_GetSpeed(void) {
 void __cdecl JLINKARM_Reset(void) {
     if (!g_is_open) return;
     pico_transact(g_hCOM, CMD_RESET_TAP, NULL, 0u, NULL, NULL, 500u);
-    /* CMD_RESET_TAP envía 5×TMS=1 + 1×TMS=0 → TAP queda en RTI */
+    /* CMD_RESET_TAP envía 5×TMS=1 (→ TLR) + 1×TMS=0 (→ RTI).
+     * tap_track_reset() deja s_state = TAP_RESET; avanzar un bit TMS=0
+     * para que el tracker coincida con el estado hardware real (RTI = TAP_IDLE). */
     tap_track_reset();
-    g_tap_state = TAP_IDLE;
+    {
+        uint8_t zero = 0x00u;
+        tap_track_tms(&zero, 1u);   /* TAP_RESET + TMS=0 → TAP_IDLE */
+    }
+    g_tap_state = tap_track_state();   /* = TAP_IDLE */
 }
 
 void __cdecl JLINKARM_ResetTarget(void) {
@@ -294,7 +312,12 @@ void __cdecl JLINKARM_ResetTarget(void) {
         (uint8_t)(g_reset_delay_ms & 0xFFu),
         (uint8_t)(g_reset_delay_ms >> 8u)
     };
-    pico_transact(g_hCOM, CMD_RESET_HARD, p, 2u, NULL, NULL, 2000u);
+    /* Timeout = duración solicitada + 500 ms de margen.
+     * El firmware aplica un cap de 5000 ms al reset, por lo que el timeout
+     * máximo efectivo es 5500 ms.  El valor fijo anterior de 2000 ms no era
+     * suficiente si g_reset_delay_ms > ~1500 ms. */
+    uint32_t timeout_ms = g_reset_delay_ms + 500u;
+    pico_transact(g_hCOM, CMD_RESET_HARD, p, 2u, NULL, NULL, timeout_ms);
 }
 
 void __cdecl JLINKARM_SetTRST(int level) {
@@ -326,14 +349,11 @@ int __cdecl JLINKARM_JTAG_StoreRaw(const uint8_t *pTDI,
     case TMS_ALL_ZERO:
         ret = jtag_shift_data(pTDI, NULL, numBits, false) ? 0 : -1;
         break;
-    case TMS_NAV_ONLY: {
-        /* Caso simple: N-1 bits TMS=0 + último bit TMS=1.
-         * Usar shift_data(exit=true) para preservar TDI en todos los bits. */
-        uint32_t last = numBits - 1u;
-        bool exit_bit = (bool)((pTMS[last >> 3u] >> (last & 7u)) & 1u);
-        ret = jtag_shift_data(pTDI, NULL, numBits, exit_bit) ? 0 : -1;
+    case TMS_NAV_ONLY:
+        /* classify_tms garantiza: N-1 bits TMS=0 + último bit TMS=1.
+         * Usar shift_data(exit=true) directamente — igual que el path normal de StoreGetRaw. */
+        ret = jtag_shift_data(pTDI, NULL, numBits, true) ? 0 : -1;
         break;
-    }
     case TMS_MIXED:
     default:
         /* TMS mixto real: bitbang bit a bit para preservar TDI correctamente.
@@ -439,10 +459,16 @@ int __cdecl JLINKARM_JTAG_StoreGetRaw(const uint8_t *pTDI,
             }
         }
 
+        /* TMS_MIXED no es compatible con bypass: bits TMS=1 intermedios harían
+         * que el TAP saliera de Shift-DR/IR antes de completar los bypass bits.
+         * Para este caso caemos al path normal (bitbang bit a bit). */
+        if (apply_bypass && classify_tms(pTMS, numBits) == TMS_MIXED)
+            apply_bypass = false;
+
         uint32_t total_bits  = pre_bits + numBits + post_bits;
         uint32_t total_bytes = (total_bits + 7u) / 8u;
 
-        if (total_bytes <= (uint32_t)sizeof(s_pad_tdi)) {
+        if (apply_bypass && total_bytes <= (uint32_t)sizeof(s_pad_tdi)) {
             /* ---- Construir TDI padded ----
              * pre_bits  → relleno (0s para DR, 1s para IR BYPASS)
              * numBits   → datos reales del target
@@ -483,10 +509,10 @@ int __cdecl JLINKARM_JTAG_StoreGetRaw(const uint8_t *pTDI,
             g_tap_state = tap_track_state();
             return ret;
         }
-        /* Cadena demasiado larga para el buffer de padding (>4096 bytes):
+        /* Cadena demasiado larga para el buffer de padding (>4096 bytes) o TMS_MIXED:
          * caer al path directo sin bypass. Se pierde la corrección multi-device
-         * pero al menos no se corrompe memoria. */
-        if (g_warn_cb)
+         * pero al menos no se corrompe memoria ni el estado del TAP. */
+        if (apply_bypass && g_warn_cb)
             g_warn_cb("PicoAdapter: bypass padding buffer overflow "
                       "(cadena JTAG demasiado larga), procesando sin bypass");
     }
@@ -546,7 +572,12 @@ void __cdecl JLINKARM_JTAG_SendNBytes(int n, const uint8_t *pData) {
 
 uint32_t __cdecl JLINKARM_JTAG_GetId(void) {
     if (!g_is_open) return 0u;
-    return jtag_read_idcode();
+    uint32_t id = jtag_read_idcode();
+    /* jtag_read_idcode hace Reset TAP → RTI.  Sincronizar el tracker. */
+    tap_track_reset();
+    { uint8_t zero = 0x00u; tap_track_tms(&zero, 1u); }   /* → TAP_IDLE */
+    g_tap_state = tap_track_state();
+    return id;
 }
 
 /* ======================================================================
@@ -559,7 +590,7 @@ void __cdecl JLINKARM_GetFirmwareString(char *pBuf, int bufSize) {
     uint16_t rx_len = 0u;
     if (pico_transact(g_hCOM, CMD_GET_VERSION, NULL, 0u, rx, &rx_len, 500u)
         && rx_len > 0u) {
-        int copy = (rx_len < (uint16_t)(bufSize - 1)) ? rx_len : bufSize - 1;
+        int copy = ((int)rx_len < bufSize - 1) ? (int)rx_len : bufSize - 1;
         memcpy(pBuf, rx, copy);
         pBuf[copy] = '\0';
     } else {
@@ -614,7 +645,7 @@ void __cdecl JLINKARM_GetStatus(JLINKARM_HW_STATUS *p) {
     uint8_t  rx[4];
     uint16_t rx_len = 0u;
     if (!pico_transact(g_hCOM, CMD_GET_STATUS, NULL, 0u, rx, &rx_len, 500u)
-        || rx_len < 3u)
+        || rx_len < 4u)
         return;
 
     /* Byte 0 = flags, bytes 1-2 = Vref mV (LE) */
@@ -648,7 +679,13 @@ int __cdecl JLINKARM_JTAG_GetDeviceInfo(int devIdx,
 int __cdecl JLINKARM_JTAG_GetIdChain(JLINKARM_JTAG_IDCODE_INFO *pInfo,
                                       int maxDev) {
     if (!g_is_open) return 0;
-    return jtag_scan_chain(pInfo, maxDev);
+    int n = jtag_scan_chain(pInfo, maxDev);
+    /* jtag_scan_chain hace Reset TAP → RTI al inicio y termina en RTI.
+     * Sincronizar el tracker para que StoreRaw/StoreGetRaw posteriores sean correctos. */
+    tap_track_reset();
+    { uint8_t zero = 0x00u; tap_track_tms(&zero, 1u); }   /* → TAP_IDLE */
+    g_tap_state = tap_track_state();
+    return n;
 }
 
 int __cdecl JLINKARM_ConfigJTAG(int irLen, int devPos) {

@@ -150,32 +150,30 @@ void pico_port_close(HANDLE h) {
 /* ---------------------------------------------------------------------- */
 
 bool pico_send(HANDLE h, uint8_t cmd, const uint8_t *payload, uint16_t len) {
-    uint8_t hdr[4] = {
-        0xA5u,
-        cmd,
-        (uint8_t)(len & 0xFFu),
-        (uint8_t)(len >> 8u)
-    };
+    /* Construir la trama completa en un único buffer y enviarla en un solo
+     * WriteFile.  Esto garantiza que header + payload + CRC llegan al firmware
+     * en el mismo token USB (o en la menor cantidad posible de paquetes CDC),
+     * evitando fragmentaciones por el driver usbser.sys de Windows.
+     *
+     * Tamaño máximo: 4 (hdr) + PICO_MAX_PAYLOAD (4096) + 1 (CRC) = 4101 bytes.
+     */
+    if (len > PICO_MAX_PAYLOAD) return false;   /* guardia: evita overflow del buffer */
+    static uint8_t s_tx_frame[4u + PICO_MAX_PAYLOAD + 1u];
 
-    /* CRC acumulativo: cabecera primero, luego payload byte a byte */
-    uint8_t crc = crc8_buf(hdr, 4u);
-    for (uint16_t i = 0u; i < len && payload; i++)
-        crc = crc8_update(crc, payload[i]);
+    s_tx_frame[0] = 0xA5u;
+    s_tx_frame[1] = cmd;
+    s_tx_frame[2] = (uint8_t)(len & 0xFFu);
+    s_tx_frame[3] = (uint8_t)(len >> 8u);
 
-    DWORD written;
+    if (len > 0u && payload)
+        memcpy(s_tx_frame + 4u, payload, len);
 
-    /* Cabecera */
-    if (!WriteFile(h, hdr, 4u, &written, NULL) || written != 4u)
-        return false;
+    uint8_t crc = crc8_buf(s_tx_frame, 4u + len);
+    s_tx_frame[4u + len] = crc;
 
-    /* Payload */
-    if (len > 0u && payload) {
-        if (!WriteFile(h, payload, len, &written, NULL) || written != (DWORD)len)
-            return false;
-    }
-
-    /* CRC */
-    if (!WriteFile(h, &crc, 1u, &written, NULL) || written != 1u)
+    DWORD written = 0;
+    uint32_t total = 4u + (uint32_t)len + 1u;
+    if (!WriteFile(h, s_tx_frame, total, &written, NULL) || written != total)
         return false;
 
     return true;
@@ -209,22 +207,33 @@ bool pico_recv(HANDLE h,
     *out_resp = hdr[1];
     uint16_t len = (uint16_t)hdr[2] | ((uint16_t)hdr[3] << 8u);
 
-    /* Usar timeout más corto para el resto de la trama */
+    /* Usar timeout más corto para el resto de la trama (payload + CRC).
+     * Si se produjera un error aquí, restauramos el timeout original antes de
+     * retornar para que la siguiente llamada a pico_recv no herede el 500 ms. */
     ct.ReadTotalTimeoutConstant = 500u;
     SetCommTimeouts(h, &ct);
 
     /* Leer payload */
     if (len > 0u) {
-        if (len > PICO_MAX_PAYLOAD || !out_payload)
+        if (len > PICO_MAX_PAYLOAD || !out_payload) {
+            ct.ReadTotalTimeoutConstant = timeout_ms;
+            SetCommTimeouts(h, &ct);
             return false;
-        if (!ReadFile(h, out_payload, len, &got, NULL) || got != (DWORD)len)
+        }
+        if (!ReadFile(h, out_payload, len, &got, NULL) || got != (DWORD)len) {
+            ct.ReadTotalTimeoutConstant = timeout_ms;
+            SetCommTimeouts(h, &ct);
             return false;
+        }
     }
 
     /* Leer CRC */
     uint8_t crc_byte;
-    if (!ReadFile(h, &crc_byte, 1u, &got, NULL) || got != 1u)
+    if (!ReadFile(h, &crc_byte, 1u, &got, NULL) || got != 1u) {
+        ct.ReadTotalTimeoutConstant = timeout_ms;
+        SetCommTimeouts(h, &ct);
         return false;
+    }
 
     /* Verificar CRC sobre hdr[0..3] + payload */
     uint8_t expected = crc8_buf(hdr, 4u);
@@ -257,7 +266,7 @@ bool pico_transact(HANDLE h,
     if (!pico_recv(h, &resp, s_rx_buf, &len, timeout_ms))
         return false;
 
-    if (resp == RESP_ERROR)
+    if (resp != RESP_OK && resp != RESP_DATA)
         return false;
 
     if (rx && rx_len) {
