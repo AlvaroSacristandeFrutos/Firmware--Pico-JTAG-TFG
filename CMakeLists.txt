@@ -7,6 +7,13 @@ project(jlink_pico_probe C CXX ASM)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 17)
 
+# Target board: pasar -DPICO_BOARD=pico2 en la línea de cmake para RP2350.
+# Debe definirse ANTES de pico_sdk_init() para que el SDK seleccione
+# los headers y linker script correctos.
+if(NOT PICO_BOARD)
+    set(PICO_BOARD "pico" CACHE STRING "Target board: pico (RP2040) o pico2 (RP2350)")
+endif()
+
 pico_sdk_init()
 
 add_executable(jlink_pico_probe
@@ -49,6 +56,8 @@ target_link_libraries(jlink_pico_probe
     hardware_uart
     hardware_resets
     hardware_watchdog
+    hardware_adc
+    hardware_clocks
     pico_unique_id
 )
 

@@ -8,6 +8,7 @@
  * ================================================================= */
 
 #include <stdint.h>
+#include "hardware/address_mapped.h"
 
 /* ---- Interfaz JTAG (conectada directamente a PIO0) ---- */
 #define PIN_TDI         16   /* GP16 — TDI_OUT al nivel-shifter */
@@ -40,18 +41,15 @@
 #define PIN_VREF_ADC    26   /* GP26 / ADC0 — tensión de referencia del objetivo / 2 */
 #define ADC_CHANNEL     0
 
-/* ---- Acceso atómico a registros del RP2040 ---- */
+/* ---- Acceso atómico a registros (RP2040 y RP2350) ---- */
 /*
- * El RP2040 expone tres alias de cada registro periférico en las 4 KB
- * siguientes a su dirección base. Escribir en estos alias realiza la
- * operación (set/clear/xor) de forma atómica sin necesidad de
- * deshabilitar interrupciones ni hacer read-modify-write.
- *
- * Alias:
- *   addr | 0x1000 → XOR
- *   addr | 0x2000 → SET
- *   addr | 0x3000 → CLEAR
+ * Ambos chips exponen aliases atómicos de cada registro periférico en
+ * las 4 KB siguientes a su dirección base:
+ *   addr | 0x1000 → XOR  (REG_ALIAS_XOR_BITS)
+ *   addr | 0x2000 → SET  (REG_ALIAS_SET_BITS)
+ *   addr | 0x3000 → CLR  (REG_ALIAS_CLR_BITS)
+ * REG_ALIAS_CLR_BITS está definido en hardware/address_mapped.h del SDK.
  */
 static inline void hw_clear_bits_raw(volatile uint32_t *addr, uint32_t mask) {
-    *(volatile uint32_t *)((uintptr_t)addr | 0x3000u) = mask;
+    *(volatile uint32_t *)((uintptr_t)addr | REG_ALIAS_CLR_BITS) = mask;
 }

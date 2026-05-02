@@ -440,21 +440,21 @@ module tapa() {
 separacion = 15;
 
 color("DimGray", 0.85) base();
-color("DarkSlateGray", 0.65)
+*color("DarkSlateGray", 0.65)
     translate([0, 0, base_altura + separacion])
         mirror([0,0,1])
             translate([0, 0, -tapa_altura])
                 tapa();
-
+translate([50,0,0])tapa();
 // PCB referencia
-color("Green", 0.2)
+*color("Green", 0.2)
     translate([pared + pcb_holgura_x, pared + pcb_holgura_y, pcb_z])
         cube([pcb_ancho, pcb_largo, pcb_grosor]);
 // LEDs referencia
-color("Lime", 0.4)
+*color("Lime", 0.4)
     translate([bx(led_verde[0]), by(led_verde[1]), pcb_z + pcb_grosor])
         cylinder(d=3, h=led_th_altura, $fn=16);
-color("Red", 0.4)
+*color("Red", 0.4)
     translate([bx(led_rojo[0]), by(led_rojo[1]), pcb_z + pcb_grosor])
         cylinder(d=3, h=led_th_altura, $fn=16);
 

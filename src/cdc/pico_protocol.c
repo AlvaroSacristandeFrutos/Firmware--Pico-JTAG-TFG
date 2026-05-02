@@ -268,20 +268,16 @@ static void handle_shift_data(const uint8_t *payload, uint16_t len) {
                       | ((uint32_t)payload[2] << 16u)
                       | ((uint32_t)payload[3] << 24u);
     bool     exit_shift = (payload[4] != 0u);
-    uint32_t num_bytes  = (num_bits + 7u) / 8u;
 
-    /*
-     * Validar tamaño. El límite real no es el buffer TDO (4096 bytes) sino
-     * el buffer DMA de recepción en jtag_pio.c (s_rx_words[1022]), que
-     * acota cada transferencia a 1022 bytes = 8176 bits. Superar ese límite
-     * hace que jtag_pio_write_read() devuelva false, pero sin este check
-     * el error solo se detectaría después de procesar el payload completo.
-     */
-    /* Validar num_bits directamente para evitar el overflow u32 en num_bytes.
-     * (num_bits + 7u) desborda si num_bits >= 0xFFFFFFF9, haciendo que num_bytes
-     * sea un valor pequeño incorrecto que esquiva el check num_bytes > 1022u. */
-    if (num_bits > 8176u ||
-        (uint32_t)len < 5u + num_bytes) {
+    /* Validar num_bits antes de calcular num_bytes para evitar overflow u32:
+     * (num_bits + 7u) desborda si num_bits >= 0xFFFFFFF9. El límite real es
+     * el buffer DMA en jtag_pio.c (s_rx_words[1022]) = 1022 bytes = 8176 bits. */
+    if (num_bits == 0u || num_bits > 8176u) {
+        send_resp_error();
+        return;
+    }
+    uint32_t num_bytes = (num_bits + 7u) / 8u;
+    if ((uint32_t)len < 5u + num_bytes) {
         send_resp_error();
         return;
     }

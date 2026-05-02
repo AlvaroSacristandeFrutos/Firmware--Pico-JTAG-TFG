@@ -7,6 +7,26 @@
  */
 #include "jtag.pio.h"
 
+/*
+ * El fichero .pio fija .pio_version 0, por lo que pioasm genera pio_version=0
+ * en el struct jtag_xfer_program.  En RP2350, PICO_PIO_VERSION=1, y la función
+ * pio_add_program() llama hard_assert(pio_can_add_program(...)), que rechaza
+ * programas cuya pio_version no coincida con la del hardware — el firmware entraría
+ * en panic antes de que USB llegase a enumerar.
+ * Las instrucciones PIO son idénticas en v0 y v1 (v1 es un superconjunto), así que
+ * basta reemplazar el campo pio_version con PICO_PIO_VERSION en tiempo de compilación.
+ */
+static const struct pio_program jtag_xfer_program_compat = {
+    .instructions = jtag_xfer_program_instructions,
+    .length       = 8,
+    .origin       = -1,
+    .pio_version  = (int8_t)PICO_PIO_VERSION,
+#if PICO_PIO_VERSION > 0
+    .used_gpio_ranges = 0x0,
+#endif
+};
+#define jtag_xfer_program jtag_xfer_program_compat
+
 #include "hardware/pio.h"
 #include "hardware/dma.h"
 #include "hardware/clocks.h"
@@ -16,9 +36,8 @@
 #include "pico/time.h"
 #include "hardware/watchdog.h"
 
-/* Valores de FUNCSEL para los pines GPIO (RP2040 datasheet, Table 5) */
-#define GPIO_FUNC_SIO   5u
-#define GPIO_FUNC_PIO0  6u
+/* GPIO_FUNC_SIO y GPIO_FUNC_PIO0 se obtienen de hardware/gpio.h —
+ * correctos para RP2040 (5, 6) y RP2350 (31, 7) automáticamente. */
 
 static PIO      s_pio      = pio0;
 static uint     s_sm       = 0;
@@ -72,7 +91,12 @@ void jtag_pio_init(void) {
     sio_hw->gpio_clr    = (1u << PIN_CTRL_OE);   /* LOW = habilitado */
 
     /* ---- Cargar el programa PIO ---- */
-    s_offset = pio_add_program(s_pio, &jtag_xfer_program);
+    /* pio_add_program devuelve int negativo si el programa no cabe o la versión
+     * PIO no coincide con la plataforma (RP2040=v0, RP2350=v1). Si falla, el
+     * cast a uint produciría un offset enorme que corrompería toda la memoria PIO. */
+    int pio_load_offset = pio_add_program(s_pio, &jtag_xfer_program);
+    if (pio_load_offset < 0) { while (true); }  /* no debería ocurrir */
+    s_offset = (uint)pio_load_offset;
 
     pio_sm_config c = jtag_xfer_program_get_default_config(s_offset);
     sm_config_set_out_pins(&c, PIN_TDI, 1);         /* OUT  → TDI (GP16) */
