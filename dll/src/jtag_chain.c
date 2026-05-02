@@ -112,6 +112,11 @@ bool jtag_write_tms(const uint8_t *pTMS, uint32_t numBits) {
                          NULL, NULL, 2000u);
 }
 
+bool jtag_set_tms(bool level) {
+    uint8_t b = level ? 1u : 0u;
+    return pico_transact(g_hCOM, CMD_SET_TMS, &b, 1u, NULL, NULL, 500u);
+}
+
 bool jtag_store_raw_bitbang(const uint8_t *pTDI, uint8_t *pTDO,
                              const uint8_t *pTMS, uint32_t numBits) {
     if (pTDO)
@@ -121,12 +126,10 @@ bool jtag_store_raw_bitbang(const uint8_t *pTDI, uint8_t *pTDO,
         bool tms = (bool)((pTMS[i >> 3u] >> (i & 7u)) & 1u);
         bool tdi = (bool)((pTDI[i >> 3u] >> (i & 7u)) & 1u);
 
-        /* Generar el bit de TMS */
-        uint8_t tms_byte = tms ? 1u : 0u;
-        if (!jtag_write_tms(&tms_byte, 1u))
+        /* Fijar TMS sin TCK, luego desplazar 1 bit TDI con 1 único pulso TCK */
+        if (!jtag_set_tms(tms))
             return false;
 
-        /* Desplazar 1 bit TDI, capturar TDO */
         uint8_t tdi_byte = tdi ? 1u : 0u;
         uint8_t tdo_byte = 0u;
         if (!jtag_shift_data(&tdi_byte, pTDO ? &tdo_byte : NULL, 1u, false))

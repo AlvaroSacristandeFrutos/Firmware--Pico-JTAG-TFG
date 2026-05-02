@@ -33,6 +33,7 @@ static const struct pio_program jtag_xfer_program_compat = {
 #include "hardware/gpio.h"
 #include "hardware/structs/sio.h"
 #include "hardware/structs/io_bank0.h"
+#include "hardware/structs/pads_bank0.h"
 #include "pico/time.h"
 #include "hardware/watchdog.h"
 
@@ -72,21 +73,35 @@ static void jtag_pio_recover(void) {
 
 void jtag_pio_init(void) {
     /* ---- TMS, nRST, nTRST → SIO outputs, inactivos (nivel alto) ---- */
-    io_bank0_hw->io[PIN_TMS].ctrl  = GPIO_FUNC_SIO;
-    io_bank0_hw->io[PIN_RST].ctrl  = GPIO_FUNC_SIO;
-    io_bank0_hw->io[PIN_TRST].ctrl = GPIO_FUNC_SIO;
+    /* En RP2350 los pads arrancan aislados (ISO=1); limpiar antes de activar OE. */
+#ifdef PADS_BANK0_GPIO0_ISO_BITS
+    hw_clear_bits_raw(&pads_bank0_hw->io[PIN_TMS],  PADS_BANK0_GPIO0_ISO_BITS);
+    hw_clear_bits_raw(&pads_bank0_hw->io[PIN_RST],  PADS_BANK0_GPIO0_ISO_BITS);
+    hw_clear_bits_raw(&pads_bank0_hw->io[PIN_TRST], PADS_BANK0_GPIO0_ISO_BITS);
+#endif
+    io_bank0_hw->io[PIN_TMS].ctrl  = (io_bank0_hw->io[PIN_TMS].ctrl  & ~0x1Fu) | (uint32_t)GPIO_FUNC_SIO;
+    io_bank0_hw->io[PIN_RST].ctrl  = (io_bank0_hw->io[PIN_RST].ctrl  & ~0x1Fu) | (uint32_t)GPIO_FUNC_SIO;
+    io_bank0_hw->io[PIN_TRST].ctrl = (io_bank0_hw->io[PIN_TRST].ctrl & ~0x1Fu) | (uint32_t)GPIO_FUNC_SIO;
     const uint32_t sio_ctrl_mask =
         (1u << PIN_TMS) | (1u << PIN_RST) | (1u << PIN_TRST);
     sio_hw->gpio_oe_set = sio_ctrl_mask;
     sio_hw->gpio_set    = sio_ctrl_mask;   /* inactivo = alto */
 
     /* ---- Pines de read-back → SIO inputs (OE=0 por defecto) ---- */
-    io_bank0_hw->io[PIN_TDI_RD].ctrl = GPIO_FUNC_SIO;
-    io_bank0_hw->io[PIN_TCK_RD].ctrl = GPIO_FUNC_SIO;
-    io_bank0_hw->io[PIN_TMS_RD].ctrl = GPIO_FUNC_SIO;
+#ifdef PADS_BANK0_GPIO0_ISO_BITS
+    hw_clear_bits_raw(&pads_bank0_hw->io[PIN_TDI_RD], PADS_BANK0_GPIO0_ISO_BITS);
+    hw_clear_bits_raw(&pads_bank0_hw->io[PIN_TCK_RD], PADS_BANK0_GPIO0_ISO_BITS);
+    hw_clear_bits_raw(&pads_bank0_hw->io[PIN_TMS_RD], PADS_BANK0_GPIO0_ISO_BITS);
+#endif
+    io_bank0_hw->io[PIN_TDI_RD].ctrl = (io_bank0_hw->io[PIN_TDI_RD].ctrl & ~0x1Fu) | (uint32_t)GPIO_FUNC_SIO;
+    io_bank0_hw->io[PIN_TCK_RD].ctrl = (io_bank0_hw->io[PIN_TCK_RD].ctrl & ~0x1Fu) | (uint32_t)GPIO_FUNC_SIO;
+    io_bank0_hw->io[PIN_TMS_RD].ctrl = (io_bank0_hw->io[PIN_TMS_RD].ctrl & ~0x1Fu) | (uint32_t)GPIO_FUNC_SIO;
 
     /* ---- CTRL_OE → SIO output, habilitar level-shifter (/OE activo LOW) ---- */
-    io_bank0_hw->io[PIN_CTRL_OE].ctrl = GPIO_FUNC_SIO;
+#ifdef PADS_BANK0_GPIO0_ISO_BITS
+    hw_clear_bits_raw(&pads_bank0_hw->io[PIN_CTRL_OE], PADS_BANK0_GPIO0_ISO_BITS);
+#endif
+    io_bank0_hw->io[PIN_CTRL_OE].ctrl = (io_bank0_hw->io[PIN_CTRL_OE].ctrl & ~0x1Fu) | (uint32_t)GPIO_FUNC_SIO;
     sio_hw->gpio_oe_set = (1u << PIN_CTRL_OE);
     sio_hw->gpio_clr    = (1u << PIN_CTRL_OE);   /* LOW = habilitado */
 
@@ -127,9 +142,14 @@ void jtag_pio_init(void) {
     pio_sm_set_consecutive_pindirs(s_pio, s_sm, PIN_TCK, 1, true);   /* salida */
 
     /* Conectar TDI, TDO y TCK al PIO0 */
-    io_bank0_hw->io[PIN_TDI].ctrl = GPIO_FUNC_PIO0;
-    io_bank0_hw->io[PIN_TDO].ctrl = GPIO_FUNC_PIO0;
-    io_bank0_hw->io[PIN_TCK].ctrl = GPIO_FUNC_PIO0;
+#ifdef PADS_BANK0_GPIO0_ISO_BITS
+    hw_clear_bits_raw(&pads_bank0_hw->io[PIN_TDI], PADS_BANK0_GPIO0_ISO_BITS);
+    hw_clear_bits_raw(&pads_bank0_hw->io[PIN_TDO], PADS_BANK0_GPIO0_ISO_BITS);
+    hw_clear_bits_raw(&pads_bank0_hw->io[PIN_TCK], PADS_BANK0_GPIO0_ISO_BITS);
+#endif
+    io_bank0_hw->io[PIN_TDI].ctrl = (io_bank0_hw->io[PIN_TDI].ctrl & ~0x1Fu) | (uint32_t)GPIO_FUNC_PIO0;
+    io_bank0_hw->io[PIN_TDO].ctrl = (io_bank0_hw->io[PIN_TDO].ctrl & ~0x1Fu) | (uint32_t)GPIO_FUNC_PIO0;
+    io_bank0_hw->io[PIN_TCK].ctrl = (io_bank0_hw->io[PIN_TCK].ctrl & ~0x1Fu) | (uint32_t)GPIO_FUNC_PIO0;
 
     /* Inicializar y arrancar la state machine */
     pio_sm_init(s_pio, s_sm, s_offset, &c);

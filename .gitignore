@@ -1,5 +1,6 @@
 # Salida de compilación
 build/
+build_pico2/
 out/
 
 # IDEs

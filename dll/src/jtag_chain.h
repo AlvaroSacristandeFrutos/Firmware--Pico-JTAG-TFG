@@ -48,7 +48,13 @@ bool jtag_shift_data(const uint8_t *pTDI, uint8_t *pTDO,
 bool jtag_write_tms(const uint8_t *pTMS, uint32_t numBits);
 
 /*
- * Modo bit-a-bit para TMS_MIXED: alterna CMD_WRITE_TMS(1 bit) + CMD_SHIFT_DATA(1 bit).
+ * Fija el pin TMS vía CMD_SET_TMS sin generar TCK.
+ * Usar antes de CMD_SHIFT_DATA en bitbang para 1 TCK por bit exacto.
+ */
+bool jtag_set_tms(bool level);
+
+/*
+ * Modo bit-a-bit para TMS_MIXED: CMD_SET_TMS(tms) + CMD_SHIFT_DATA(1 bit) por bit.
  * pTDO puede ser NULL.
  */
 bool jtag_store_raw_bitbang(const uint8_t *pTDI, uint8_t *pTDO,

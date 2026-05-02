@@ -45,6 +45,7 @@
 #define CMD_GET_HW_VERSION  0x12u   /* devuelve u32 versión hardware */
 #define CMD_GET_CLOCK       0x13u   /* devuelve u32 frecuencia actual en kHz */
 #define CMD_SELECT_IF       0x14u   /* selecciona interfaz: 0=JTAG (único soportado) */
+#define CMD_SET_TMS         0x15u   /* fija pin TMS vía SIO sin generar TCK */
 
 #define FIRMWARE_VERSION "PicoAdapter v1.0"
 /* Versión hardware: 1.0.0 en formato SEGGER (Major<<16 | Minor<<8 | Patch) */
@@ -397,6 +398,19 @@ static void handle_get_clock(void) {
 }
 
 /*
+ * CMD_SET_TMS — payload: [level: u8]
+ *
+ * Fija el pin TMS (GP19) al nivel indicado vía SIO sin generar ningún pulso
+ * de TCK.  Usado por el bitbang de la DLL para implementar secuencias TMS mixtas
+ * con un único TCK por bit: CMD_SET_TMS(tms) + CMD_SHIFT_DATA(1 bit).
+ */
+static void handle_set_tms(const uint8_t *payload, uint16_t len) {
+    if (len < 1u) { send_resp_error(); return; }
+    jtag_tap_set_tms(payload[0] != 0u);
+    send_resp_ok();
+}
+
+/*
  * CMD_SELECT_IF — payload: [iface: u8]
  *
  * Selecciona la interfaz de depuración:
@@ -491,6 +505,9 @@ static void dispatch(void) {
         break;
     case CMD_SELECT_IF:
         handle_select_if(s_payload, s_len);
+        break;
+    case CMD_SET_TMS:
+        handle_set_tms(s_payload, s_len);
         break;
     default:
         send_resp_error();

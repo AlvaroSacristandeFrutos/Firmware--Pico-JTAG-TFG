@@ -31,6 +31,7 @@
 #define CMD_GET_HW_VERSION  0x12u
 #define CMD_GET_CLOCK       0x13u
 #define CMD_SELECT_IF       0x14u
+#define CMD_SET_TMS         0x15u   /* Fija el pin TMS vía SIO sin generar TCK */
 /* CMD_UART_SET_BAUD (0x20), CMD_UART_SEND (0x21) y CMD_UART_RECV (0x22) eliminados.
  * El baudrate se cambia vía SetCommState sobre el COM MI_02 (g_hUART),
  * que dispara SET_LINE_CODING al firmware. Los datos se envían/reciben

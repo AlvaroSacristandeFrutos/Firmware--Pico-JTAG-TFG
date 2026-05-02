@@ -263,6 +263,11 @@ void __cdecl JLINKARM_TIF_GetAvailable(uint32_t *pMask) {
 
 void __cdecl JLINKARM_SetSpeed(uint32_t khz) {
     if (!g_is_open) return;
+    /* 0xFFFE = adaptive clocking, 0xFFFF = auto speed — no soportados, usar máximo fijo. */
+    if (khz >= 0xFFFEu) khz = 50000u;
+    /* Limitar a 50 MHz (50 000 kHz) para evitar overflow en la multiplicación
+     * y para respetar el límite del level-shifter del PCB. */
+    if (khz > 50000u) khz = 50000u;
     uint32_t hz = khz * 1000u;
     uint8_t  p[4] = {
         (uint8_t)( hz        & 0xFFu),
