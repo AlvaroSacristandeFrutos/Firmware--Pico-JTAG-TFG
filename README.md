@@ -1,8 +1,8 @@
 # jlink-pico-probe
 
-Firmware bare-metal para **Raspberry Pi Pico (RP2040)** que implementa el protocolo
-**PicoAdapter**, una sonda JTAG de bajo coste para boundary scan y depuración.
-La capa USB es completamente bare-metal (sin TinyUSB).
+Firmware bare-metal para **Raspberry Pi Pico (RP2040)** y **Raspberry Pi Pico 2 (RP2350)**
+que implementa el protocolo **PicoAdapter**, una sonda JTAG de bajo coste para boundary scan
+y depuración. La capa USB es completamente bare-metal (sin TinyUSB).
 
 El repositorio incluye también una **DLL de Windows** (`JLink_x64.dll`) que se hace
 pasar por la DLL oficial de SEGGER, lo que permite que cualquier software compatible
@@ -75,10 +75,12 @@ Circuito objetivo (FPGA, MCU, PCB...)
 
 ## Requisitos de hardware
 
-- **Raspberry Pi Pico** (RP2040): el modelo original, Pico H o cualquier clon compatible con RP2040.
+- **Raspberry Pi Pico (RP2040)**: el modelo original, Pico H o cualquier clon compatible con RP2040.
   La Pico W también funciona pero no aporta nada extra.
-- **Cable micro-USB de datos**: muchos cables USB baratos solo tienen los cables de alimentación
-  y no los de datos. Si el Pico no aparece en el PC, prueba con otro cable.
+- **Raspberry Pi Pico 2 (RP2350)**: la Pico 2 o Pico 2 H. El firmware es compatible con ambos
+  chips; compila un `.uf2` distinto según el target (ver [Compilar el firmware](#compilar-el-firmware)).
+- **Cable micro-USB de datos** (Pico/Pico H) o **USB-C** (Pico 2): muchos cables baratos solo
+  tienen cables de alimentación y no de datos. Si la placa no aparece en el PC, prueba con otro cable.
 - **PC con Windows 10 o Windows 11 de 64 bits** (x64).
 
 ---
@@ -149,8 +151,8 @@ python --version
 
 Estas tres herramientas son el núcleo del sistema de compilación del firmware:
 
-- **ARM GCC**: compilador cruzado que genera código para el RP2040 (arquitectura ARM Cortex-M0+)
-  desde Windows. Sin él no se puede compilar el firmware.
+- **ARM GCC**: compilador cruzado que genera código para el RP2040 (Cortex-M0+) y el RP2350
+  (Cortex-M33) desde Windows. Sin él no se puede compilar el firmware.
 - **CMake**: sistema de build que lee el `CMakeLists.txt` y genera los ficheros de compilación.
 - **Ninja**: ejecutor de builds rápido, invocado por CMake para compilar en paralelo.
 
@@ -250,21 +252,39 @@ cd <ruta donde clonaste jlink-pico-probe>
 
 ## Compilar el firmware
 
+El firmware soporta dos targets distintos con una misma base de código:
+
+| Target | Chip | Carpeta de build | Archivo de salida |
+|--------|------|-----------------|-------------------|
+| `pico` (por defecto) | RP2040 (Cortex-M0+) | `build\` | `build\jlink_pico_probe.uf2` |
+| `pico2` | RP2350 (Cortex-M33) | `build_pico2\` | `build_pico2\jlink_pico_probe.uf2` |
+
 ### Primera vez
 
-La primera compilación configura CMake (genera la caché en `build\`) y compila también
-las herramientas auxiliares `pioasm` y `picotool`. Por eso requiere MSVC disponible en
-el PATH, lo que se consigue abriendo el **Símbolo del sistema para desarrolladores**
+La primera compilación configura CMake y compila también las herramientas auxiliares
+`pioasm` y `picotool`. Por eso requiere MSVC disponible en el PATH, lo que se consigue
+abriendo el **Símbolo del sistema para desarrolladores**
 (búscalo en el menú Inicio como "Símbolo del sistema para desarrolladores de Visual Studio").
 
-Desde el **Símbolo del sistema para desarrolladores**, en la raíz del repositorio:
-
+**Para RP2040 (Pico):**
 ```cmd
-cmake -B build -G Ninja -DPICO_SDK_PATH=%USERPROFILE%\.pico-sdk\sdk\2.2.0
+cmake -B build -G Ninja -DPICO_SDK_PATH=%USERPROFILE%\.pico-sdk\sdk\2.2.0 -DPICO_BOARD=pico
 cmake --build build
 ```
-
 Resultado: `build\jlink_pico_probe.uf2`
+
+**Para RP2350 (Pico 2):**
+```cmd
+cmake -B build_pico2 -G Ninja -DPICO_SDK_PATH=%USERPROFILE%\.pico-sdk\sdk\2.2.0 -DPICO_BOARD=pico2
+cmake --build build_pico2
+```
+Resultado: `build_pico2\jlink_pico_probe.uf2`
+
+**Compilar ambos targets a la vez (script bash):**
+```bash
+bash build_all.sh
+```
+Este script configura y compila `build\` (RP2040) y `build_pico2\` (RP2350) en un solo paso.
 
 > La primera compilación puede tardar varios minutos porque CMake descarga y compila
 > `picotool` automáticamente desde internet.
@@ -275,11 +295,12 @@ Una vez configurado, solo se recompilan los archivos modificados. Ya **no hace f
 el Símbolo del sistema para desarrolladores, funciona desde un CMD normal:
 
 ```cmd
-cmake --build build
+cmake --build build          ← RP2040
+cmake --build build_pico2    ← RP2350
 ```
 
-> Solo necesitas repetir el paso de configuración (`cmake -B build ...`) si borras
-> la carpeta `build\` o cambias la versión del SDK.
+> Solo necesitas repetir el paso de configuración (`cmake -B ... -DPICO_BOARD=...`) si
+> borras la carpeta de build o cambias la versión del SDK.
 
 ---
 
@@ -342,18 +363,25 @@ La próxima vez que arranque JtagScannerQt buscará la DLL desde cero y usará l
 
 ## Flashear el Pico
 
-Una vez compilado el firmware, hay que cargarlo en la Pico. El RP2040 tiene un
-bootloader de fábrica que aparece como unidad USB al mantener pulsado BOOTSEL.
+Una vez compilado el firmware, hay que cargarlo en la placa. Ambos chips tienen un
+bootloader de fábrica que expone una unidad USB de almacenamiento masivo al mantener
+pulsado BOOTSEL durante el encendido.
 
-**Pasos:**
-1. **Desconecta** el Pico del USB si estaba conectado.
-2. **Mantén pulsado el botón BOOTSEL**, es el botón blanco pequeño en la placa Pico.
+**Pasos (iguales para RP2040 y RP2350):**
+1. **Desconecta** la placa del USB si estaba conectada.
+2. **Mantén pulsado el botón BOOTSEL** (botón blanco pequeño).
 3. **Sin soltar BOOTSEL**, conecta el cable USB al PC.
-4. **Suelta BOOTSEL**. En el explorador de archivos de Windows aparecerá una nueva
-   unidad de disco llamada **RPI-RP2** (como si fuera un pendrive).
-5. **Copia** el archivo `build\jlink_pico_probe.uf2` a la unidad RPI-RP2.
-6. La copia tarda 1-2 segundos. El Pico **se reinicia automáticamente** al terminar
-   y desaparece la unidad RPI-RP2. El LED de la placa se encenderá si el firmware arrancó.
+4. **Suelta BOOTSEL**. En el explorador de archivos aparecerá una nueva unidad:
+   - **RPI-RP2** en la Pico (RP2040)
+   - **RP2350** en la Pico 2 (RP2350)
+5. **Copia** el `.uf2` correspondiente a esa unidad:
+   - RP2040 → `build\jlink_pico_probe.uf2`
+   - RP2350 → `build_pico2\jlink_pico_probe.uf2`
+6. La copia tarda 1-2 segundos. La placa **se reinicia automáticamente** al terminar
+   y desaparece la unidad. El LED se encenderá si el firmware arrancó correctamente.
+
+> **Importante:** no intercambies los `.uf2`; el compilado para RP2350 no arrancará
+> en una Pico original y viceversa.
 
 Para volver a flashear (p.ej. tras recompilar), repite desde el paso 1.
 

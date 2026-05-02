@@ -43,6 +43,7 @@ static void uart0_rx_isr(void) {
         uint16_t next = (s_rx_head + 1u) & UART_RX_BUF_MASK;
         if (next != s_rx_tail) {   /* descartar silenciosamente si lleno */
             s_rx_buf[s_rx_head] = c;
+            __asm volatile("" ::: "memory");   /* barrera compilador: dato visible antes de avanzar head */
             s_rx_head = next;
         }
     }
