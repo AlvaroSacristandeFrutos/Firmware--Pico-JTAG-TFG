@@ -69,11 +69,22 @@ typedef enum {
     ST_RECV_CRC,
 } parser_state_t;
 
-static parser_state_t s_state   = ST_WAIT_START;
-static uint8_t        s_cmd     = 0;
-static uint16_t       s_len     = 0;
-static uint16_t       s_recv    = 0;
-static uint8_t        s_crc_acc = 0;   /* CRC acumulado sobre bytes ya procesados */
+/*
+ * Timeout de frame parcial: si el parser permanece en un estado distinto a
+ * ST_WAIT_START durante más de PARSER_TIMEOUT_US sin recibir ningún byte (p.ej.
+ * por un CDC RX overflow que descartó bytes intermedios), se resetea a
+ * ST_WAIT_START para evitar el stall permanente.
+ */
+#define PARSER_TIMEOUT_US  2000000u   /* 2 s: cubre pausas de fragmentación normales
+                                       * (hasta ~500 ms) y aún permite recuperación
+                                       * antes del PING en el test de overflow (flush=3 s) */
+
+static parser_state_t s_state        = ST_WAIT_START;
+static uint8_t        s_cmd          = 0;
+static uint16_t       s_len          = 0;
+static uint16_t       s_recv         = 0;
+static uint8_t        s_crc_acc      = 0;   /* CRC acumulado sobre bytes ya procesados */
+static uint64_t       s_last_byte_us = 0u;  /* timestamp del último byte recibido */
 static uint8_t        s_payload[MAX_PAYLOAD];
 
 /* Buffer para construir la trama de respuesta completa */
@@ -520,13 +531,23 @@ static void dispatch(void) {
 /* ---------------------------------------------------------------------- */
 
 void protocol_reset(void) {
-    s_state   = ST_WAIT_START;
-    s_recv    = 0u;
-    s_len     = 0u;
-    s_crc_acc = 0u;
+    s_state        = ST_WAIT_START;
+    s_recv         = 0u;
+    s_len          = 0u;
+    s_crc_acc      = 0u;
+    s_last_byte_us = 0u;
 }
 
 void protocol_feed(uint8_t byte) {
+    /* Si el parser lleva más de PARSER_TIMEOUT_US en un estado intermedio sin
+     * recibir bytes (stall por overflow del buffer CDC RX), resetear silenciosamente. */
+    uint64_t now = time_us_64();
+    if (s_state != ST_WAIT_START &&
+            (now - s_last_byte_us) > PARSER_TIMEOUT_US) {
+        s_state = ST_WAIT_START;
+    }
+    s_last_byte_us = now;
+
     switch (s_state) {
 
     case ST_WAIT_START:

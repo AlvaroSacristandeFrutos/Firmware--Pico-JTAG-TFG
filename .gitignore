@@ -9,6 +9,7 @@ out/
 
 # Tests locales (no se suben al repositorio)
 test/
+pytest.ini
 
 # Documentación y ficheros de explicación generados
 TFG_CONTENIDO_COMPLETO.txt
