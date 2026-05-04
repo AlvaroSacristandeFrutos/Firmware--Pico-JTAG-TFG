@@ -153,17 +153,15 @@ static uint8_t crc8_block(const uint8_t *data, size_t len) {
 /*  Funciones de respuesta                                                 */
 /* ---------------------------------------------------------------------- */
 
-static void send_resp_simple(uint8_t code, bool is_error) {
-    led_red_set(is_error);
+static void send_resp_simple(uint8_t code) {
     uint8_t frame[5] = {PROTO_START, code, 0x00u, 0x00u, 0x00u};
     frame[4] = crc8_block(frame, 4u);
     cdc_send(frame, 5u);
 }
-#define send_resp_ok()    send_resp_simple(RESP_OK,    false)
-#define send_resp_error() send_resp_simple(RESP_ERROR, true)
+#define send_resp_ok()    do { send_resp_simple(RESP_OK);    } while (0)
+#define send_resp_error() do { led_red_set(true); send_resp_simple(RESP_ERROR); } while (0)
 
 static void send_resp_data(const uint8_t *data, uint16_t len) {
-    led_red_set(false);
     s_tx_frame[0] = PROTO_START;
     s_tx_frame[1] = RESP_DATA;
     s_tx_frame[2] = (uint8_t)(len & 0xFFu);
