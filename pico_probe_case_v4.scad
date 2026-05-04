@@ -1,8 +1,8 @@
 // ============================================================
-// Caja para Sonda JTAG — Raspberry Pi Pico  v14
+// Caja para Sonda JTAG — Raspberry Pi Pico  v15
 // Labio perimetral + láminas 4 lados + holguras asimétricas
-// Ajustes v14: -10mm altura base, JTAG fusionado y ampliado,
-// LED rojo agrandado, tapa +1mm, holgura láminas, tornillos a 64.5mm
+// Ajustes v15: encaje tapa-base corregido, base +3mm,
+// tornillos a 65.5mm, hull() huecos delanteros, etiquetas off
 // ============================================================
 // COORDS: origen sup-izq Pico, X→dcha, Y→abajo
 // SCAD:   X=userX, Y=pcb_largo-userY, Z=altura
@@ -26,7 +26,7 @@ pcb_holgura_tras = 6.5;   // lado JTAG (scad Y bajo)
 tolerancia_impresion = 0.2;
 
 // === CAJA ===
-pared = 1.8;
+pared = 2.2;
 suelo_grosor = 1.5;
 techo_grosor = 1.5;
 
@@ -37,10 +37,10 @@ pico_altura     = 15.0;
 conector_altura = 8.5;
 led_th_altura   = 9.0;
 
-// Reducción de altura aplicada a la base (-10mm).
+// Reducción de altura aplicada a la base (-7mm).
 // Se aplica también a techo_interior para que tapa_interior_h
 // (y por tanto tapa_altura) no cambie respecto a v13.
-reduccion_caja  = 10.0;
+reduccion_caja  = 5.0;
 
 linea_corte     = pcb_z + pcb_grosor + conector_altura + 1.0 - reduccion_caja;
 techo_interior  = pcb_z + pcb_grosor + pico_altura + 1.0 - reduccion_caja;
@@ -67,10 +67,10 @@ soporte_d = 6.5;
 soporte_h = pcb_z - suelo_grosor;
 
 agujeros_montaje = [
-    [4.1,  4.1],    // Delantera izquierda (Pico)
-    [36.8, 4.1],    // Delantera derecha (Pico)
-    [4.2,  68.6],   // Trasera izquierda (JTAG)  — Movido a 64.5mm del delantero
-    [36.8, 68.6],   // Trasera derecha (JTAG)    — Movido a 64.5mm del delantero
+    [4.1,  4.1],    // Delantera izquierda (Pico) - FIJO
+    [36.8, 4.1],    // Delantera derecha (Pico)   - FIJO
+    [4.2,  69.6],   // Trasera izquierda (JTAG)   - Movido a 65.5mm del delantero
+    [36.8, 69.6],   // Trasera derecha (JTAG)     - Movido a 65.5mm del delantero
 ];
 
 // === LEDS ===
@@ -78,7 +78,7 @@ led_rojo   = [10.4, 59.4];
 led_verde  = [10.4, 54.4];
 led_pico   = [14.677, 4.577];
 ventana_led_3mm  = 3.5;
-ventana_led_pico = 1.5;
+ventana_led_pico = 2.0;
 
 // === JTAG 20 PINES ===
 jtag20_esq = [7.55, 64.3];
@@ -132,7 +132,7 @@ texto_pequeno = 1.3;
 // ============================================================
 labio_alto    = 2.5;
 labio_grosor  = 1.0;
-labio_holgura = 0.15;
+labio_holgura = 0.4;   // v15: 0.15 → 0.4 para encaje a presión correcto
 
 // ============================================================
 // LÁMINAS DE ALINEACIÓN (4 lados)
@@ -184,14 +184,14 @@ module base() {
             
             // LÁMINAS (suben desde la base)
             // Izquierda
-            translate([pared/2, caja_largo/2 - lamina_largo/2, base_altura])
+            *translate([pared/2, caja_largo/2 - lamina_largo/2, base_altura])
                 cube([lamina_grosor, lamina_largo, lamina_alto]);
             // Delantera: 2 piezas flanqueando USB (scad Y alto)
-            translate([pared + 2,
+            *translate([pared + 2,
                        caja_largo - pared + pared/2,
                        base_altura])
                 cube([lamina_del_ancho, lamina_grosor, lamina_alto]);
-            translate([caja_ancho - pared - 2 - lamina_del_ancho,
+            *translate([caja_ancho - pared - 2 - lamina_del_ancho,
                        caja_largo - pared + pared/2,
                        base_altura])
                 cube([lamina_del_ancho, lamina_grosor, lamina_alto]);
@@ -229,14 +229,14 @@ module base() {
         // HUECOS PARA LÁMINAS DE LA TAPA (derecha + trasera)
         // FIX: altura extendida con labio_alto para que no bloquee
         // Derecha
-        translate([caja_ancho - pared - lamina_holgura,
+        *translate([caja_ancho - pared - lamina_holgura,
                    caja_largo/2 - lamina_largo/2 - lamina_holgura,
                    base_altura - lamina_alto - 0.1])
             cube([lamina_grosor + 2*lamina_holgura,
                   lamina_largo + 2*lamina_holgura,
                   lamina_alto + labio_alto + 0.2]);
         // Trasera (scad Y bajo) — FIX: extender con labio_alto
-        translate([caja_ancho/2 - lamina_tras_largo/2 - lamina_holgura,
+        *translate([caja_ancho/2 - lamina_tras_largo/2 - lamina_holgura,
                    pared/2 - lamina_holgura,
                    base_altura - lamina_alto - 0.1])
             cube([lamina_tras_largo + 2*lamina_holgura,
@@ -263,55 +263,49 @@ module tapa() {
     rm = rebaje_margen;
     
     difference() {
-        // v14: silueta exterior +1mm total (0.5mm por lado),
-        // centrada respecto al sistema original para no descentrar
-        // ningún elemento interior.
-        translate([-0.5, -0.5, 0])
-            caja_redondeada(caja_ancho + 1, caja_largo + 1, th, r=2);
+        // v15: contorno exterior revertido al original.
+        // El crecimiento se hace ahora en el vaciado interior para
+        // que la base entre realmente dentro de la tapa.
+        caja_redondeada(caja_ancho, caja_largo, th, r=2);
         
-        // Vaciado interior
-        translate([pared, pared, techo_grosor])
-            caja_redondeada(interior_ancho, interior_largo,
+        // Vaciado interior — v15: +0.8mm en X e Y, centrado
+        translate([pared - 0.4, pared - 0.4, techo_grosor])
+            caja_redondeada(interior_ancho + 0.8, interior_largo + 0.8,
                             tapa_interior_h + 0.1, r=1);
         
         // RANURA PARA LABIO PERIMETRAL
         translate([pared - labio_grosor - labio_holgura,
                    pared - labio_grosor - labio_holgura,
                    th - labio_alto])
-            difference() {
-                caja_redondeada(
-                    interior_ancho + 2*(labio_grosor + labio_holgura),
-                    interior_largo + 2*(labio_grosor + labio_holgura),
-                    labio_alto + 0.1, r=1.5);
-                translate([labio_holgura, labio_holgura, -0.1])
-                    caja_redondeada(
-                        interior_ancho + 2*labio_holgura,
-                        interior_largo + 2*labio_holgura,
-                        labio_alto + 0.3, r=1);
-            }
+            caja_redondeada(
+                interior_ancho + 2*(labio_grosor + labio_holgura),
+                interior_largo + 2*(labio_grosor + labio_holgura),
+                labio_alto + 0.1, r=1.5);
         
         // HUECOS LÁMINAS BASE (izquierda + delantera×2)
         // Izquierda
-        translate([pared/2 - lamina_holgura,
+        *translate([pared/2 - lamina_holgura,
                    caja_largo/2 - lamina_largo/2 - lamina_holgura,
                    th - lamina_alto - 0.1])
             cube([lamina_grosor + 2*lamina_holgura,
                   lamina_largo + 2*lamina_holgura,
                   lamina_alto + 0.2]);
-        // Delantera izq USB
-        translate([pared + 2 - lamina_holgura,
-                   caja_largo - pared + pared/2 - lamina_holgura,
-                   th - lamina_alto - 0.1])
-            cube([lamina_del_ancho + 2*lamina_holgura,
-                  lamina_grosor + 2*lamina_holgura,
-                  lamina_alto + 0.2]);
-        // Delantera der USB
-        translate([caja_ancho - pared - 2 - lamina_del_ancho - lamina_holgura,
-                   caja_largo - pared + pared/2 - lamina_holgura,
-                   th - lamina_alto - 0.1])
-            cube([lamina_del_ancho + 2*lamina_holgura,
-                  lamina_grosor + 2*lamina_holgura,
-                  lamina_alto + 0.2]);
+        // Delantera USB (v15: hueco único con hull() que elimina el labio central)
+        *hull() {
+            translate([pared + 2 - lamina_holgura,
+                       caja_largo - pared + pared/2 - lamina_holgura,
+                       th - lamina_alto - 0.1])
+                cube([lamina_del_ancho + 2*lamina_holgura,
+                      lamina_grosor + 2*lamina_holgura,
+                      lamina_alto + 0.2]);
+            
+            translate([caja_ancho - pared - 2 - lamina_del_ancho - lamina_holgura,
+                       caja_largo - pared + pared/2 - lamina_holgura,
+                       th - lamina_alto - 0.1])
+                cube([lamina_del_ancho + 2*lamina_holgura,
+                      lamina_grosor + 2*lamina_holgura,
+                      lamina_alto + 0.2]);
+        }
         
         // === REBAJES ===
         // v14: JTAG 20 + JTAG 10 fusionados en un único rebaje continuo
@@ -337,7 +331,7 @@ module tapa() {
         // === ABERTURAS SUPERFICIE ===
         translate([bx(led_verde[0]), by(led_verde[1]), -0.1])
             cylinder(d=ventana_led_3mm, h=techo_grosor + 0.2, $fn=24);
-        // v14: hueco LED rojo ampliado a 3.8x2.7 (+0.5mm por eje)
+        //hueco LED rojo ampliado a 3.8x2.7 (+0.5mm por eje)
         // y centrado en X y en Y respecto a led_rojo.
         translate([bx(led_rojo[0]) - 1.9, by(led_rojo[1]) - 1.35, -0.1])
             cube([3.8, 2.7, techo_grosor + 0.2]);
@@ -345,7 +339,7 @@ module tapa() {
         translate([bx(led_pico[0]), by(led_pico[1]), -0.1])
             cylinder(d=ventana_led_pico, h=techo_grosor + 0.2, $fn=24);
         
-        // v14: aberturas JTAG 20 + JTAG 10 fusionadas en un único hueco
+        // aberturas JTAG 20 + JTAG 10 fusionadas en un único hueco
         // (union de los dos rectángulos manteniendo posiciones originales).
         union() {
             translate([bx(jtag20_cx) - jtag20_ranura_ancho/2,
@@ -365,43 +359,43 @@ module tapa() {
             cube([usb_abertura_ancho, pared + 0.2, th + 0.1]);
         translate([caja_ancho - pared - 0.1,
                    by(swd_cy) - swd_abertura_ancho/2, 0])
-            cube([pared + 0.2, swd_abertura_ancho, th + 0.1]);
+            cube([pared + 2.0, swd_abertura_ancho, th + 0.1]);  
         
-        // === ETIQUETAS ===
-        translate([bx(jtag10_cx),
+        // === ETIQUETAS === (v15: desactivadas con * — el código se conserva)
+        *translate([bx(jtag10_cx),
                    by(jtag10_cy) + jtag10_ranura_alto/2 + rm + 2,
                    grabado_profundidad])
             mirror([0,0,1]) linear_extrude(grabado_profundidad + 0.1)
                 text("JTAG 10", size=texto_mediano, halign="center",
                      valign="center", font="Liberation Sans:style=Bold");
-        translate([bx(uart_cx),
+        *translate([bx(uart_cx),
                    by(uart_cy) + uart_ranura_alto/2 + rm + 2,
                    grabado_profundidad])
             mirror([0,0,1]) linear_extrude(grabado_profundidad + 0.1)
                 text("UART", size=texto_mediano, halign="center",
                      valign="center", font="Liberation Sans:style=Bold");
-        translate([bx(usb_cx), caja_largo - pared - 5, grabado_profundidad])
+        *translate([bx(usb_cx), caja_largo - pared - 5, grabado_profundidad])
             mirror([0,0,1]) linear_extrude(grabado_profundidad + 0.1)
                 text("USB", size=texto_mediano, halign="center",
                      valign="center", font="Liberation Sans:style=Bold");
-        translate([bx(led_verde[0]) - ventana_led_3mm/2 - 0.8,
+        *translate([bx(led_verde[0]) - ventana_led_3mm/2 - 0.8,
                    by(led_verde[1]), grabado_profundidad])
             mirror([0,0,1]) linear_extrude(grabado_profundidad + 0.1)
                 text("G", size=texto_mediano, halign="right",
                      valign="center", font="Liberation Sans:style=Bold");
-        translate([bx(led_rojo[0]) - ventana_led_3mm/2 - 0.8,
+        *translate([bx(led_rojo[0]) - ventana_led_3mm/2 - 0.8,
                    by(led_rojo[1]), grabado_profundidad])
             mirror([0,0,1]) linear_extrude(grabado_profundidad + 0.1)
                 text("R", size=texto_mediano, halign="right",
                      valign="center", font="Liberation Sans:style=Bold");
-        translate([bx(led_pico[0]) - ventana_led_pico/2 - 0.8,
+        *translate([bx(led_pico[0]) - ventana_led_pico/2 - 0.8,
                    by(led_pico[1]), grabado_profundidad])
             mirror([0,0,1]) linear_extrude(grabado_profundidad + 0.1)
                 text("PWR", size=texto_pequeno, halign="right",
                      valign="center", font="Liberation Sans");
         
-        // JTAG 20 grabado en pared trasera (scad Y=0)
-        translate([bx(jtag20_cx), grabado_profundidad, th/2])
+        // JTAG 20 grabado en pared trasera (scad Y=0) (v15: desactivado con *)
+        *translate([bx(jtag20_cx), grabado_profundidad, th/2])
             rotate([90, 180, 0])
                 linear_extrude(grabado_profundidad + 0.1)
                     mirror([1, 0, 0])
@@ -410,17 +404,17 @@ module tapa() {
     }
     
     // LÁMINAS (bajan desde la tapa)
-    // Derecha
-    translate([caja_ancho - pared,
+    // Derecha (v15: desactivada con * para no imprimir)
+    *translate([caja_ancho - pared,
                caja_largo/2 - lamina_largo/2, th])
         cube([lamina_grosor, lamina_largo, lamina_alto]);
     // Trasera (scad Y bajo)
-    translate([caja_ancho/2 - lamina_tras_largo/2,
+    *translate([caja_ancho/2 - lamina_tras_largo/2,
                pared/2, th])
         cube([lamina_tras_largo, lamina_grosor, lamina_alto]);
     
-    // SWD relieve
-    translate([caja_ancho, by(swd_cy) + swd_abertura_ancho/2 + 4, th/2])
+    // SWD relieve (v15: desactivado con *)
+    *translate([caja_ancho, by(swd_cy) + swd_abertura_ancho/2 + 4, th/2])
         rotate([270, 0, 90])
             linear_extrude(0.4)
                 text("SWD", size=texto_mediano, halign="center",
@@ -471,27 +465,3 @@ translate([caja_ancho * 2 + 10, 0, 0])
         tapa();
 //
 
-// ============================================================
-// NOTAS v14
-// ============================================================
-//
-// Fixes vs v13:
-//   1. LED rojo: hueco ampliado a 3.8x2.7 (+0.5mm por eje)
-//      y centrado en X y en Y respecto a led_rojo.
-//   2. JTAG 20 y JTAG 10: ranuras ampliadas (+3mm X, +1mm Y).
-//   3. JTAG 20 y JTAG 10: fusionados en un único hueco continuo
-//      (union de los dos rectángulos manteniendo posiciones).
-//   4. Tornillos delanteros movidos a Y=7.4/7.3 para que la
-//      distancia con sus pares traseros sea exactamente 64.5mm
-//      (asimetría 0.1mm preservada en valor absoluto).
-//   5. Altura de la base reducida 10mm (reduccion_caja=10).
-//      tapa_interior_h se mantiene → tapa idéntica a v13.
-//      Distancia top PCB ↔ top labio: 12mm → 2mm.
-//   6. Tapa +1mm total (X e Y), centrada respecto al sistema
-//      original: agujeros y rebajes interiores no se descentran.
-//   7. Láminas: dimensiones largas reducidas en 1mm
-//      (15→14, 8→7, 12→11) y lamina_holgura subida a 0.65
-//      → pestañas más pequeñas y agujeros más amplios.
-//
-// Tornillos: M3 × 8-10mm (solo base)
-// ============================================================
