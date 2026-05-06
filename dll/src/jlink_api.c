@@ -77,8 +77,13 @@ BOOL WINAPI DllMain(HINSTANCE hInst, DWORD reason, LPVOID reserved) {
         g_error_cb       = NULL;
         g_log_fp         = NULL;
     }
-    if (reason == DLL_PROCESS_DETACH && g_is_open)
-        JLINKARM_Close();
+    if (reason == DLL_PROCESS_DETACH && g_is_open) {
+        /* No llamar a JLINKARM_Close() desde DllMain: fclose() no es seguro
+         * en PROCESS_DETACH (CRT puede estar ya destruido). Solo CloseHandle. */
+        if (g_hCOM  != INVALID_HANDLE_VALUE) { CloseHandle(g_hCOM);  g_hCOM  = INVALID_HANDLE_VALUE; }
+        if (g_hUART != INVALID_HANDLE_VALUE) { CloseHandle(g_hUART); g_hUART = INVALID_HANDLE_VALUE; }
+        g_is_open = 0;
+    }
 
     return TRUE;
 }
@@ -213,7 +218,10 @@ uint32_t __cdecl JLINKARM_EMU_GetList(uint32_t mask,
             s_cache_found  = found;
             s_cache_serial = serial;
             s_cache_tick   = now;
-            if (found) strncpy(s_cached_port, port, sizeof(s_cached_port));
+            if (found) {
+                strncpy(s_cached_port, port, sizeof(s_cached_port) - 1);
+                s_cached_port[sizeof(s_cached_port) - 1] = '\0';
+            }
         }
     }
 
@@ -572,7 +580,8 @@ uint32_t __cdecl JLINKARM_JTAG_GetU32(void) {
 
 void __cdecl JLINKARM_JTAG_SendNBytes(int n, const uint8_t *pData) {
     if (!g_is_open || n <= 0) return;
-    jtag_shift_data(pData, NULL, (uint32_t)(n * 8), false);
+    if (n > (int)(PICO_MAX_PAYLOAD - 5u)) return;
+    jtag_shift_data(pData, NULL, (uint32_t)n * 8u, false);
 }
 
 uint32_t __cdecl JLINKARM_JTAG_GetId(void) {

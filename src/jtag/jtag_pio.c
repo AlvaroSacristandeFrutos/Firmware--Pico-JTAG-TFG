@@ -1,4 +1,4 @@
-#include "jtag_pio.h"
+﻿#include "jtag_pio.h"
 #include "board_config.h"
 
 /*
@@ -280,7 +280,13 @@ bool jtag_pio_write_read(const uint8_t *tdi_buf, uint8_t *tdo_buf,
         }
         watchdog_update();   /* evitar reset WDT en transferencias largas a baja frecuencia */
     }
-    dma_channel_wait_for_finish_blocking(s_dma_tx);   /* ya casi terminado */
+    /* TX termina siempre antes que RX (mismo DREQ PIO); reusar el deadline. */
+    while (dma_channel_is_busy(s_dma_tx)) {
+        if (time_us_64() >= deadline) {
+            jtag_pio_recover();
+            return false;
+        }
+    }
 
     /* Extraer bytes de los bits [31:24] de cada word */
     for (uint32_t i = 0u; i < num_bytes; i++)
