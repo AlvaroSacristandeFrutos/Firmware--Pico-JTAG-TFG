@@ -25,6 +25,7 @@
 #include "hardware/regs/usb.h"
 #include "hardware/structs/usb.h"
 #include "hardware/irq.h"
+#include "hardware/sync.h"
 #include "hardware/resets.h"
 #include "pico/time.h"
 
