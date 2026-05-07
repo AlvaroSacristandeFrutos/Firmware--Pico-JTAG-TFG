@@ -25,7 +25,6 @@
 #include "hardware/regs/usb.h"
 #include "hardware/structs/usb.h"
 #include "hardware/irq.h"
-#include "hardware/sync.h"
 #include "hardware/resets.h"
 #include "pico/time.h"
 
@@ -115,13 +114,10 @@ void usb_start_transfer(struct usb_endpoint_configuration *ep,
 
     if (ep_is_tx(ep)) {
         if (len > 0) {
-            /* Redondear al múltiplo de 4 para evitar STRH a dirección impar en DPRAM
-             * con UNALIGN_TRP=1 (RES1 en RP2350).  Se rellena el DESTINO en lugar de
-             * sobrelectura del fuente: buf puede tener exactamente len bytes. */
+            /* Misma razón que en usb_ep0_in_begin: redondear al múltiplo de 4
+             * para evitar STRH a dirección impar con UNALIGN_TRP=1 (RES1 en RP2350). */
             uint16_t clen = (uint16_t)((len + 3u) & ~3u);
-            memcpy((void *)ep->data_buffer, buf, len);
-            if (clen > len)
-                memset((void *)(ep->data_buffer + len), 0, clen - len);
+            memcpy((void *)ep->data_buffer, buf, clen);
         }
         val |= USB_BUF_CTRL_FULL;
     }
@@ -294,7 +290,6 @@ static void usb_handle_setup_packet(void) {
     uint8_t req = pkt->bRequest;
 
     usb_get_endpoint_configuration(EP0_IN_ADDR)->next_pid = 1u;
-    s_set_line_coding_pending = 0xFFu;   /* cancelar cualquier DATA phase pendiente anterior */
 
     if (!(req_direction & USB_DIR_IN)) {
         if (req == USB_REQUEST_SET_ADDRESS) {
@@ -569,21 +564,14 @@ void cdc_send(const uint8_t *data, uint16_t len) {
          * Si llegó un bus reset mientras esperábamos en el spin, configured pasa a
          * false y EP3 IN buffer_control ya fue limpiado por usb_bus_reset(). Armar
          * la transferencia en ese estado dejaría AVAIL=1 en el buffer, causando que
-         * el host reciba un paquete fantasma con datos obsoletos al reconectar.
-         * El check y el set de s_cdc_tx_busy se hacen con IRQ deshabilitadas para
-         * cerrar la race condition: un bus reset entre el check y el set dejaría
-         * s_cdc_tx_busy=true con EP3 ya limpiado, bloqueando el siguiente cdc_send. */
+         * el host reciba un paquete fantasma con datos obsoletos al reconectar. */
+        if (!configured) return;
+
         uint16_t chunk = len - off;
         if (chunk > 64u) chunk = 64u;
 
-        /* Sección crítica extendida hasta usb_start_transfer: evita que un bus reset
-         * limpie EP3 buffer_control entre el check de configured y el armado. */
-        uint32_t irq_state = save_and_disable_interrupts();
-        if (!configured) { restore_interrupts(irq_state); return; }
         s_cdc_tx_busy = true;
         usb_start_transfer(ep, (uint8_t *)(data + off), chunk);
-        restore_interrupts(irq_state);
-
         off += chunk;
     }
 }
@@ -607,18 +595,15 @@ void uart_cdc_send(const uint8_t *data, uint16_t len) {
             }
         }
 
-        /* Misma guardia que cdc_send: sección crítica extendida hasta
-         * usb_start_transfer para evitar que un bus reset limpie EP4 entre
-         * el check de configured y el armado. */
+        /* Misma guardia que cdc_send: abortar si el bus se resetó mientras
+         * esperábamos, para no dejar AVAIL=1 en EP4 IN con datos obsoletos. */
+        if (!configured) return;
+
         uint16_t chunk = len - off;
         if (chunk > 64u) chunk = 64u;
 
-        uint32_t irq_state = save_and_disable_interrupts();
-        if (!configured) { restore_interrupts(irq_state); return; }
         s_uart_cdc_tx_busy = true;
         usb_start_transfer(ep, (uint8_t *)(data + off), chunk);
-        restore_interrupts(irq_state);
-
         off += chunk;
     }
 }

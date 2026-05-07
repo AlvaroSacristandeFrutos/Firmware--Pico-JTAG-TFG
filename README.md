@@ -1,4 +1,4 @@
-﻿# jlink-pico-probe
+# jlink-pico-probe
 
 Firmware bare-metal para **Raspberry Pi Pico (RP2040)** y **Raspberry Pi Pico 2 (RP2350)**
 que implementa el protocolo **PicoAdapter**, una sonda JTAG de bajo coste para boundary scan
@@ -40,7 +40,7 @@ usa el **protocolo PicoAdapter**, un formato de trama serie propio:
 [0xA5] [CMD] [LEN_LO] [LEN_HI] [PAYLOAD...] [CRC8]
 ```
 
-El firmware implementa 14 comandos activos (PING, RESET TAP, desplazamiento de datos JTAG,
+El firmware implementa 15 comandos activos (PING, RESET TAP, desplazamiento de datos JTAG,
 lectura de tensión de referencia, control UART del target, etc.).
 
 ### DLL de Windows (`JLink_x64.dll`)
@@ -400,14 +400,14 @@ jlink-pico-probe/
 │   │   └── gpio_init.c/.h      ← Inicialización de todos los GPIOs del PCB
 │   ├── usb/
 │   │   ├── usb_device.c/.h     ← Controlador USB bare-metal (IRQ-driven, DPRAM)
-│   │   └── usb_descriptors.c/.h← Descriptores USB (VID=0x2E8A, PID=0x000A, 4 interfaces en 2 funciones CDC)
+│   │   └── usb_descriptors.c/.h← Descriptores USB (VID=0x2E8A, PID=0x000A, 2 interfaces CDC)
 │   ├── jtag/
 │   │   ├── jtag_pio.c/.h       ← Motor JTAG: PIO + DMA (transferencia bidireccional)
 │   │   ├── jtag_tap.c/.h       ← Máquina de estados TAP (16 estados, IEEE 1149.1)
 │   │   └── jtag.pio            ← Programa PIO: 8 instrucciones, LSB-first, 4 ciclos/bit
 │   ├── cdc/
 │   │   ├── cdc_rx.c/.h         ← Buffer circular RX CDC (ISR → bucle principal)
-│   │   └── pico_protocol.c/.h  ← Parser protocolo PicoAdapter (14 comandos activos)
+│   │   └── pico_protocol.c/.h  ← Parser protocolo PicoAdapter (15 comandos activos)
 │   ├── uart/
 │   │   ├── uart_driver.c/.h    ← UART0 IRQ-driven para debug serie del target (GP12/GP13)
 │   │   └── uart_bridge.c/.h    ← Puente transparente EP4 ↔ UART0 (bridge task)
@@ -416,10 +416,10 @@ jlink-pico-probe/
 │       └── adc.c/.h            ← Lectura de tensión de referencia del target (GP26/ADC0)
 └── dll/
     ├── CMakeLists.txt          ← Build system de la DLL (MSVC, soporta x64 y x86)
-    ├── JLink_x64.def           ← Tabla de exportaciones x64 (44 funciones: 41 compatibles SEGGER + 3 propias)
+    ├── JLink_x64.def           ← Tabla de exportaciones x64 (44 funciones con nombres SEGGER)
     ├── JLinkARM.def            ← Tabla de exportaciones x86 (variante 32-bit)
     └── src/
-        ├── jlink_api.c         ← 44 funciones exportadas: 41 JLINKARM_* (SEGGER) + JLINK_PICO_SetLED + JLINK_PICO_GetVersion + PICO_UART_SetBaud
+        ├── jlink_api.c         ← 41 funciones exportadas: JLINKARM_* + PICO_UART_* + JLINK_PICO_*
         ├── pico_transport.c/.h ← Capa serie: construcción/envío de tramas PicoAdapter
         ├── com_detect.c/.h     ← Detección del puerto COM (SetupDI + overlapped I/O)
         ├── jtag_chain.c/.h     ← JTAG de alto nivel: escaneo de cadena, lectura IDCODE

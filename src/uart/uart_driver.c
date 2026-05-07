@@ -29,7 +29,7 @@ _Static_assert((UART_RX_BUF_SIZE & (UART_RX_BUF_SIZE - 1u)) == 0u,
 
 static uint8_t           s_rx_buf[UART_RX_BUF_SIZE];
 static volatile uint16_t s_rx_head = 0u;   /* escrito por ISR  */
-static volatile uint16_t s_rx_tail = 0u;   /* leído por main   */
+static          uint16_t s_rx_tail = 0u;   /* leído por main   */
 
 static uint32_t s_current_baud = 115200u;
 

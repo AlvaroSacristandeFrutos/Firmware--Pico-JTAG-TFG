@@ -70,12 +70,8 @@ bool jtag_shift_data(const uint8_t *pTDI, uint8_t *pTDO,
     if (numBits == 0u)
         return true;
 
-    /* Validar antes de dividir: (numBits + 7u) desborda u32 si numBits >= 0xFFFFFFF9.
-     * El payload real enviado es 5 (header shift_data) + num_bytes, por lo que el límite
-     * correcto es (PICO_MAX_PAYLOAD - 5) bytes de TDI, no PICO_MAX_PAYLOAD entero. */
-    if (numBits > (uint32_t)(PICO_MAX_PAYLOAD - 5u) * 8u) return false;
     uint32_t num_bytes   = (numBits + 7u) / 8u;
-    if (num_bytes > PICO_MAX_PAYLOAD - 5u) return false;
+    if (num_bytes > PICO_MAX_PAYLOAD) return false;
     uint16_t payload_len = (uint16_t)(5u + num_bytes);
 
     /* Payload en buffer estático: [numBits:u32 LE][exit:u8][TDI bytes] */
@@ -92,10 +88,9 @@ bool jtag_shift_data(const uint8_t *pTDI, uint8_t *pTDO,
                             pTDO ? s_rx_buf : NULL, &rx_len,
                             2000u);
 
-    if (ok && pTDO) {
-        if (rx_len != (uint16_t)num_bytes) return false;
+    if (ok && pTDO && rx_len == (uint16_t)num_bytes)
         memcpy(pTDO, s_rx_buf, num_bytes);
-    }
+
     return ok;
 }
 
@@ -103,9 +98,8 @@ bool jtag_write_tms(const uint8_t *pTMS, uint32_t numBits) {
     if (numBits == 0u)
         return true;
 
-    if (numBits > (uint32_t)(PICO_MAX_PAYLOAD - 2u) * 8u) return false;
     uint32_t num_bytes   = (numBits + 7u) / 8u;
-    if (num_bytes > PICO_MAX_PAYLOAD - 2u) return false;
+    if (num_bytes > PICO_MAX_PAYLOAD) return false;
     uint16_t payload_len = (uint16_t)(2u + num_bytes);
 
     /* Payload en buffer estático: [numBits:u16 LE][TMS bytes] */
@@ -125,9 +119,6 @@ bool jtag_set_tms(bool level) {
 
 bool jtag_store_raw_bitbang(const uint8_t *pTDI, uint8_t *pTDO,
                              const uint8_t *pTMS, uint32_t numBits) {
-    if (numBits == 0u)
-        return true;
-    if (numBits > (uint32_t)PICO_MAX_PAYLOAD * 8u) return false;
     if (pTDO)
         memset(pTDO, 0, (numBits + 7u) / 8u);
 

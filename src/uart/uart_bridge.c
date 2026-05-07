@@ -66,7 +66,7 @@ void uart_bridge_task(void) {
     /* USB → UART: drenar el buffer circular en chunks de 64 bytes.
      * Se copia a un buffer local antes de llamar a uart_driver_send()
      * para que la ISR pueda seguir escribiendo en s_tx_buf sin riesgo. */
-    while (s_tx_tail != s_tx_head) {
+    if (s_tx_tail != s_tx_head) {
         uint8_t  local[64];
         uint16_t count = 0u;
         while (count < sizeof(local) && s_tx_tail != s_tx_head) {

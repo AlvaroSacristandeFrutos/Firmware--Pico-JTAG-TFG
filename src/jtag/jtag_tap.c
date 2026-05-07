@@ -68,14 +68,14 @@ void jtag_tap_shift_ir(const uint8_t *ir_data, uint32_t ir_len) {
 
     /* Desplazar los primeros ir_len-1 bits con TMS=0 (TDO se descarta) */
     if (ir_len > 1u) {
-        if (!jtag_pio_write(ir_data, ir_len - 1u)) return;
+        jtag_pio_write(ir_data, ir_len - 1u);
     }
 
     /* Último bit con TMS=1 → Exit1-IR */
     uint8_t last_tdi = (ir_data[(ir_len - 1u) / 8u] >> ((ir_len - 1u) & 7u)) & 1u;
     uint8_t tdo_last;
     tms_set(true);
-    if (!jtag_pio_write_read(&last_tdi, &tdo_last, 1u)) return;
+    jtag_pio_write_read(&last_tdi, &tdo_last, 1u);
 
     /* Update-IR (TMS sigue en 1), luego RTI */
     pulse_tck(1);
@@ -93,18 +93,17 @@ void jtag_tap_shift_dr(const uint8_t *tdi_data, uint8_t *tdo_data,
 
     /* Desplazar los primeros dr_len-1 bits con TMS=0, capturando TDO si hay buffer */
     if (dr_len > 1u) {
-        if (tdo_data) {
-            if (!jtag_pio_write_read(tdi_data, tdo_data, dr_len - 1u)) return;
-        } else {
-            if (!jtag_pio_write(tdi_data, dr_len - 1u)) return;
-        }
+        if (tdo_data)
+            jtag_pio_write_read(tdi_data, tdo_data, dr_len - 1u);
+        else
+            jtag_pio_write(tdi_data, dr_len - 1u);
     }
 
     /* Último bit con TMS=1 → Exit1-DR */
     uint8_t last_tdi = (tdi_data[(dr_len - 1u) / 8u] >> ((dr_len - 1u) & 7u)) & 1u;
     uint8_t tdo_last;
     tms_set(true);
-    if (!jtag_pio_write_read(&last_tdi, &tdo_last, 1u)) return;
+    jtag_pio_write_read(&last_tdi, &tdo_last, 1u);
 
     /* Almacenar el último bit TDO en tdo_data si se proporcionó buffer */
     if (tdo_data) {

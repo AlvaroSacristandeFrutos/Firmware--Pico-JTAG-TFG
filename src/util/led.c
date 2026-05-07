@@ -8,8 +8,8 @@
 #define LED_OB_MASK   (1u << PIN_LED_ONBOARD)
 
 void led_set(bool on) {
-    if (on) sio_hw->gpio_set = LED_MASK;
-    else    sio_hw->gpio_clr = LED_MASK;
+    if (on) sio_hw->gpio_clr = LED_MASK;
+    else    sio_hw->gpio_set = LED_MASK;
 }
 
 void led_toggle(void) {
@@ -17,8 +17,8 @@ void led_toggle(void) {
 }
 
 void led_red_set(bool on) {
-    if (on) sio_hw->gpio_set = LED_RED_MASK;
-    else    sio_hw->gpio_clr = LED_RED_MASK;
+    if (on) sio_hw->gpio_clr = LED_RED_MASK;
+    else    sio_hw->gpio_set = LED_RED_MASK;
 }
 
 void led_red_toggle(void) {

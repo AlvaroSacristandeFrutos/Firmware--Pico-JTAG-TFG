@@ -43,9 +43,8 @@ static bool find_port_by_hwid(const char *hwid_prefix,
         char hwid[512];
         if (!SetupDiGetDeviceRegistryPropertyA(hdi, &did,
                 SPDRP_HARDWAREID, NULL,
-                (PBYTE)hwid, sizeof(hwid) - 2, NULL))
+                (PBYTE)hwid, sizeof(hwid) - 1, NULL))
             continue;
-        hwid[sizeof(hwid) - 2] = '\0';
         hwid[sizeof(hwid) - 1] = '\0';
 
         bool match = false;
@@ -206,9 +205,8 @@ bool pico_detect_uart(char *out_port, size_t out_size) {
         char hwid[512];
         if (!SetupDiGetDeviceRegistryPropertyA(hdi, &did,
                 SPDRP_HARDWAREID, NULL,
-                (PBYTE)hwid, sizeof(hwid) - 2, NULL))
+                (PBYTE)hwid, sizeof(hwid) - 1, NULL))
             continue;
-        hwid[sizeof(hwid) - 2] = '\0';
         hwid[sizeof(hwid) - 1] = '\0';
 
         bool match = false;
