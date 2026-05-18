@@ -71,7 +71,7 @@ bool jtag_shift_data(const uint8_t *pTDI, uint8_t *pTDO,
         return true;
 
     uint32_t num_bytes   = (numBits + 7u) / 8u;
-    if (num_bytes > PICO_MAX_PAYLOAD) return false;
+    if (num_bytes > PICO_MAX_PAYLOAD - 5u) return false;
     uint16_t payload_len = (uint16_t)(5u + num_bytes);
 
     /* Payload en buffer estático: [numBits:u32 LE][exit:u8][TDI bytes] */
@@ -99,7 +99,7 @@ bool jtag_write_tms(const uint8_t *pTMS, uint32_t numBits) {
         return true;
 
     uint32_t num_bytes   = (numBits + 7u) / 8u;
-    if (num_bytes > PICO_MAX_PAYLOAD) return false;
+    if (num_bytes > PICO_MAX_PAYLOAD - 2u) return false;
     uint16_t payload_len = (uint16_t)(2u + num_bytes);
 
     /* Payload en buffer estático: [numBits:u16 LE][TMS bytes] */
@@ -148,22 +148,22 @@ bool jtag_store_raw_bitbang(const uint8_t *pTDI, uint8_t *pTDO,
 uint32_t jtag_read_idcode(void) {
     /* Reset TAP → Test-Logic-Reset → Run-Test/Idle */
     uint8_t tms_rst[1] = {0x1Fu};  /* 5 bits TMS=1 */
-    jtag_write_tms(tms_rst, 5u);
+    if (!jtag_write_tms(tms_rst, 5u)) return 0xFFFFFFFFu;
     uint8_t tms_rti[1] = {0x00u};
-    jtag_write_tms(tms_rti, 1u);
+    if (!jtag_write_tms(tms_rti, 1u)) return 0xFFFFFFFFu;
 
     /* RTI → Shift-DR: TMS = 1,0,0  (Select-DR-Scan → Capture-DR → Shift-DR) */
     uint8_t tms_shdr[1] = {0x01u};  /* 3 bits: bit0=1, bit1=0, bit2=0 */
-    jtag_write_tms(tms_shdr, 3u);
+    if (!jtag_write_tms(tms_shdr, 3u)) return 0xFFFFFFFFu;
 
     /* Desplazar 32 bits con TMS=1 en el último bit → Exit1-DR */
     uint8_t tdi[4] = {0xFFu, 0xFFu, 0xFFu, 0xFFu};
     uint8_t tdo[4] = {0};
-    jtag_shift_data(tdi, tdo, 32u, true);
+    if (!jtag_shift_data(tdi, tdo, 32u, true)) return 0xFFFFFFFFu;
 
     /* Exit1-DR → Update-DR (TMS=1) → RTI (TMS=0): 2 bits 1,0 */
     uint8_t tms_upd_rti[1] = {0x01u};
-    jtag_write_tms(tms_upd_rti, 2u);
+    jtag_write_tms(tms_upd_rti, 2u);   /* best-effort: no afecta al IDCODE ya leído */
 
     return (uint32_t)tdo[0]
          | ((uint32_t)tdo[1] << 8u)

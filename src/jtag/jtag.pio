@@ -11,7 +11,7 @@
 ;   3. Leer los bytes de TDO de RX FIFO (autopush cada 8 bits)
 ;   El desplazamiento es LSB primero, alineado a byte para DMA
 
-.pio_version 0
+.pio_version 1
 .program jtag_xfer
 .side_set 1 opt
 
@@ -22,7 +22,7 @@
 loop:
     out pins, 1         side 0      ; Sacar el bit de TDI, TCK bajo
     nop                 side 1      ; TCK alto — el objetivo captura TDI
-    in  pins, 1         side 1      ; Muestrear TDO durante TCK alto (estable desde el flanco descendente anterior)
+    in  pins, 1         side 1      ; Muestrear TDO durante TCK alto
     jmp x-- loop        side 0      ; Decrementar contador y repetir
 
     push                side 0      ; Empujar los bits TDO restantes al RX FIFO

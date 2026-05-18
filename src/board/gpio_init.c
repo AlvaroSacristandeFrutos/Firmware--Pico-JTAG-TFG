@@ -30,6 +30,22 @@ static void gpio_set_output(uint32_t pin) {
     sio_hw->gpio_clr    = 1u << pin;   /* empezar a nivel bajo */
 }
 
+/* Configura un GPIO como salida push-pull a través de SIO.
+ * El pin se inicializa a nivel ALTO (para señales activas-LOW como nRST/nTRST).
+ * Orden crítico: valor + OE en SIO primero, luego conectar el mux al pad.
+ * Así el pad nunca ve un glitch LOW durante la configuración. */
+static void gpio_set_output_high(uint32_t pin) {
+    /* 1. Precargar el registro de salida SIO a HIGH antes de conectar el pad */
+    sio_hw->gpio_set    = 1u << pin;
+    sio_hw->gpio_oe_set = 1u << pin;
+#ifdef PADS_BANK0_GPIO0_ISO_BITS
+    /* 2. En RP2350 desaislar el pad antes de conectar la función */
+    hw_clear_bits_raw(&pads_bank0_hw->io[pin], PADS_BANK0_GPIO0_ISO_BITS);
+#endif
+    /* 3. Conectar el pad al SIO: solo ahora el pin físico empieza a conducir HIGH */
+    gpio_set_function_sio(pin);
+}
+
 void gpio_init_all(void) {
     /* Sacar IO_BANK0 y PADS_BANK0 del reset para poder acceder a los GPIO */
     hw_clear_bits_raw(&resets_hw->reset,
@@ -39,6 +55,13 @@ void gpio_init_all(void) {
             (RESETS_RESET_IO_BANK0_BITS | RESETS_RESET_PADS_BANK0_BITS)) !=
             (RESETS_RESET_IO_BANK0_BITS | RESETS_RESET_PADS_BANK0_BITS))
         ;
+
+    /* Señales de reset del target: activas a nivel bajo.
+     * Se inicializan en HIGH (inactivo) ANTES que cualquier otro periférico
+     * para evitar que el pull-down por defecto del RP2040 (PDE=1) mantenga
+     * el target en reset mientras el resto del firmware arranca. */
+    gpio_set_output_high(PIN_RST);    /* GP20 — nRST  inactivo */
+    gpio_set_output_high(PIN_TRST);   /* GP21 — nTRST inactivo */
 
     /* LEDs externos del PCB.
      * El resto de pines se configuran dentro de su módulo correspondiente:

@@ -46,6 +46,9 @@
 #define CMD_GET_CLOCK       0x13u   /* devuelve u32 frecuencia actual en kHz */
 #define CMD_SELECT_IF       0x14u   /* selecciona interfaz: 0=JTAG (único soportado) */
 #define CMD_SET_TMS         0x15u   /* fija pin TMS vía SIO sin generar TCK */
+#define CMD_GET_PIN_STATE   0x16u   /* lee TDI_RD(GP6), TCK_RD(GP7), TMS_RD(GP8), TDO(GP17), GP0 */
+#define CMD_PIO_DIAG        0x30u   /* diagnóstico PIO: dbg_padin, GPIO17_CTRL, PADS_GPIO17, GPIO_OE */
+#define CMD_SW_JTAG_IDCODE  0x31u   /* lee IDCODE en software (SIO bit-bang, sin PIO) */
 
 #define FIRMWARE_VERSION "PicoAdapter v1.0"
 /* Versión hardware: 1.0.0 en formato SEGGER (Major<<16 | Minor<<8 | Patch) */
@@ -524,6 +527,34 @@ static void dispatch(void) {
     case CMD_SET_TMS:
         handle_set_tms(s_payload, s_len);
         break;
+    case CMD_PIO_DIAG: {
+        uint8_t diag[24];
+        jtag_pio_get_diag(diag);
+        send_resp_data(diag, 24u);
+        break;
+    }
+    case CMD_SW_JTAG_IDCODE: {
+        uint32_t id = jtag_sw_read_idcode();
+        uint8_t buf[4] = {
+            (uint8_t)(id        & 0xFFu),
+            (uint8_t)((id >> 8) & 0xFFu),
+            (uint8_t)((id >>16) & 0xFFu),
+            (uint8_t)((id >>24) & 0xFFu),
+        };
+        send_resp_data(buf, 4u);
+        break;
+    }
+    case CMD_GET_PIN_STATE: {
+        uint32_t g = sio_hw->gpio_in;
+        uint8_t state = (uint8_t)(
+              ((g >> PIN_TDI_RD) & 1u)         /* bit 0 = TDI_RD  GP6  */
+            | (((g >> PIN_TCK_RD) & 1u) << 1u) /* bit 1 = TCK_RD  GP7  */
+            | (((g >> PIN_TMS_RD) & 1u) << 2u) /* bit 2 = TMS_RD  GP8  */
+            | (((g >> PIN_TDO)    & 1u) << 3u) /* bit 3 = TDO     GP17 */
+            | (((g >> 0u)         & 1u) << 4u));/* bit 4 = GP0 (diagnóstico) */
+        send_resp_data(&state, 1u);
+        break;
+    }
     default:
         send_resp_error();
         break;
@@ -577,8 +608,7 @@ void protocol_feed(uint8_t byte) {
         s_len    |= (uint16_t)((uint16_t)byte << 8u);
         s_crc_acc = crc8_byte(s_crc_acc, byte);
         if (s_len > (uint16_t)MAX_PAYLOAD) {
-            send_resp_error();       /* fallo rápido: payload demasiado grande */
-            s_state = ST_WAIT_START;
+            s_state = ST_WAIT_START;   /* drop silencioso: CRC aún no validado */
             break;
         }
         s_recv  = 0u;

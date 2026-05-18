@@ -158,7 +158,7 @@ bool pico_send(HANDLE h, uint8_t cmd, const uint8_t *payload, uint16_t len) {
      * Tamaño máximo: 4 (hdr) + PICO_MAX_PAYLOAD (4096) + 1 (CRC) = 4101 bytes.
      */
     if (len > PICO_MAX_PAYLOAD) return false;   /* guardia: evita overflow del buffer */
-    static uint8_t s_tx_frame[4u + PICO_MAX_PAYLOAD + 1u];
+    uint8_t s_tx_frame[4u + PICO_MAX_PAYLOAD + 1u];
 
     s_tx_frame[0] = 0xA5u;
     s_tx_frame[1] = cmd;
@@ -251,8 +251,6 @@ bool pico_recv(HANDLE h,
 /*  Transacción completa                                                   */
 /* ---------------------------------------------------------------------- */
 
-static uint8_t s_rx_buf[PICO_MAX_PAYLOAD];
-
 bool pico_transact(HANDLE h,
                    uint8_t        cmd,
                    const uint8_t *tx,      uint16_t  tx_len,
@@ -263,6 +261,7 @@ bool pico_transact(HANDLE h,
 
     uint8_t  resp;
     uint16_t len = 0;
+    uint8_t  s_rx_buf[PICO_MAX_PAYLOAD];
     if (!pico_recv(h, &resp, s_rx_buf, &len, timeout_ms))
         return false;
 

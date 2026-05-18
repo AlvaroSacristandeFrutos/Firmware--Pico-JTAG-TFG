@@ -130,6 +130,34 @@ const char * __cdecl JLINKARM_OpenEx(const char *log, void *reserved) {
     s_cache_tick   = GetTickCount();
     s_cache_found  = 1;
 
+    /* Velocidad inicial conservadora: 1 MHz es compatible con la mayoría de targets.
+     * El cliente puede subir la velocidad después con JLINKARM_SetSpeed.
+     * 4 MHz (anterior default de DLL y firmware) supera el límite de algunos CPLDs
+     * y FPGAs viejos, causando que el TAP no responda en el primer scan. */
+    {
+        uint32_t hz = 1000u * 1000u;   /* 1 MHz */
+        uint8_t  p[4] = {
+            (uint8_t)( hz        & 0xFFu),
+            (uint8_t)((hz >>  8) & 0xFFu),
+            (uint8_t)((hz >> 16) & 0xFFu),
+            (uint8_t)((hz >> 24) & 0xFFu)
+        };
+        if (pico_transact(g_hCOM, CMD_SET_CLOCK, p, 4u, NULL, NULL, 500u))
+            g_speed_khz = 1000u;
+    }
+
+    /* Pulso nTRST LOW → HIGH: muchos chips (ARM7/9, CPLDs Xilinx/Altera) no activan
+     * el TAP JTAG hasta que nTRST recibe al menos un pulso LOW después del power-on.
+     * Un J-Link real lo hace automáticamente al conectar. El firmware mantiene nTRST
+     * en HIGH desde el arranque; sin este pulso el reset TAP por TMS (5×TMS=1) puede
+     * no ser suficiente para que el chip responda. */
+    {
+        uint8_t lo = 0u, hi = 1u;
+        pico_transact(g_hCOM, CMD_SET_TRST, &lo, 1u, NULL, NULL, 500u);
+        Sleep(10u);   /* ≥10 ms: cubre el trise más lento especificado en datasheets ARM */
+        pico_transact(g_hCOM, CMD_SET_TRST, &hi, 1u, NULL, NULL, 500u);
+    }
+
     /* Reiniciar el tracker TAP: el hardware arranca en Test-Logic-Reset
      * (o en el estado en que quedó el target, pero lo tratamos como desconocido).
      * Sin este reset, un Close+Open en el mismo proceso heredaría el estado TAP
@@ -299,14 +327,48 @@ uint32_t __cdecl JLINKARM_GetSpeed(void) {
 
 void __cdecl JLINKARM_Reset(void) {
     if (!g_is_open) return;
-    pico_transact(g_hCOM, CMD_RESET_TAP, NULL, 0u, NULL, NULL, 500u);
-    /* CMD_RESET_TAP envía 5×TMS=1 (→ TLR) + 1×TMS=0 (→ RTI).
-     * tap_track_reset() deja s_state = TAP_RESET; avanzar un bit TMS=0
-     * para que el tracker coincida con el estado hardware real (RTI = TAP_IDLE). */
+
+    /* SWD → JTAG switching sequence (ARM ADI v5.2, §B4.3.4)
+     *
+     * Los chips ARM Cortex arrancan en modo SWD. En ese modo TDO no conduce
+     * datos JTAG y readIDCODE devuelve 0x00000000. Esta secuencia lo cambia:
+     *
+     * 1. ≥50 ciclos TMS=1  — line-reset SWD (pone la interfaz en IDLE/DORMANT)
+     * 2. 16 bits {0x9E,0xE7} — magic SWD→JTAG (= 0xE79E LSB-first en cable)
+     * 3. ≥50 ciclos TMS=1  — JTAG TAP reset (lleva el TAP a Test-Logic-Reset)
+     * 4.  1 ciclo TMS=0    — RTI
+     *
+     * Los chips que ya están en modo JTAG ignoran esta secuencia sin problema.
+     */
+    {
+        /* 56 × TMS=1 : payload [56 LE u16][7 × 0xFF] */
+        uint8_t line_reset[9] = {
+            56u, 0u,
+            0xFFu, 0xFFu, 0xFFu, 0xFFu, 0xFFu, 0xFFu, 0xFFu
+        };
+        pico_transact(g_hCOM, CMD_WRITE_TMS, line_reset, sizeof(line_reset),
+                      NULL, NULL, 500u);
+
+        /* 16 × magic : payload [16 LE u16][0x9E][0xE7] */
+        uint8_t magic[4] = { 16u, 0u, 0x9Eu, 0xE7u };
+        pico_transact(g_hCOM, CMD_WRITE_TMS, magic, sizeof(magic),
+                      NULL, NULL, 500u);
+
+        /* 56 × TMS=1 : JTAG TAP reset */
+        pico_transact(g_hCOM, CMD_WRITE_TMS, line_reset, sizeof(line_reset),
+                      NULL, NULL, 500u);
+
+        /* 1 × TMS=0 : RTI */
+        uint8_t rti[3] = { 1u, 0u, 0x00u };
+        pico_transact(g_hCOM, CMD_WRITE_TMS, rti, sizeof(rti),
+                      NULL, NULL, 500u);
+    }
+
+    /* Actualizar el tap tracker: tras TLR + 1×TMS=0 estamos en RTI */
     tap_track_reset();
     {
         uint8_t zero = 0x00u;
-        tap_track_tms(&zero, 1u);   /* TAP_RESET + TMS=0 → TAP_IDLE */
+        tap_track_tms(&zero, 1u);
     }
     g_tap_state = tap_track_state();   /* = TAP_IDLE */
 }
@@ -572,7 +634,7 @@ uint32_t __cdecl JLINKARM_JTAG_GetU32(void) {
 
 void __cdecl JLINKARM_JTAG_SendNBytes(int n, const uint8_t *pData) {
     if (!g_is_open || n <= 0) return;
-    jtag_shift_data(pData, NULL, (uint32_t)(n * 8), false);
+    jtag_shift_data(pData, NULL, (uint32_t)n * 8u, false);
 }
 
 uint32_t __cdecl JLINKARM_JTAG_GetId(void) {

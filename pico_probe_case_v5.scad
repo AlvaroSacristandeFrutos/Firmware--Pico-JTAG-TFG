@@ -22,16 +22,16 @@ pcb_holgura_x = 0.5;
 // Delantera (Pico): tornillo a 5.4mm → 5.4 - 4.1 = 1.3mm
 // Trasera (JTAG):  tornillo a 7.4mm → 7.4 - 0.9 = 6.5mm
 pcb_holgura_del  = 0.0;   // lado Pico/USB (scad Y alto)
-pcb_holgura_tras = 6.5;   // lado JTAG (scad Y bajo)
+pcb_holgura_tras = 2.5;   // lado JTAG (scad Y bajo)
 tolerancia_impresion = 0.2;
 
 // === CAJA ===
-pared = 2.2;
+pared = 3.6;
 suelo_grosor = 1.5;
 techo_grosor = 1.5;
 
 // === ALTURAS ===
-altura_comp_inferior = 3.5;
+altura_comp_inferior = 2;
 pcb_z = suelo_grosor + altura_comp_inferior + 0.5;
 pico_altura     = 15.0;
 conector_altura = 8.5;
@@ -40,10 +40,10 @@ led_th_altura   = 9.0;
 // Reducción de altura aplicada a la base (-7mm).
 // Se aplica también a techo_interior para que tapa_interior_h
 // (y por tanto tapa_altura) no cambie respecto a v13.
-reduccion_caja  = 5.0;
+reduccion_caja  = 8.0;
 
-linea_corte     = pcb_z + pcb_grosor + conector_altura + 1.0 - reduccion_caja;
-techo_interior  = pcb_z + pcb_grosor + pico_altura + 1.0 - reduccion_caja;
+linea_corte     = pcb_z + pcb_grosor + conector_altura + 0.4 - reduccion_caja;
+techo_interior  = pcb_z + pcb_grosor + pico_altura + 0.4 - reduccion_caja;
 tapa_interior_h = techo_interior - linea_corte;
 
 base_altura = linea_corte;
@@ -131,8 +131,8 @@ texto_pequeno = 1.3;
 // LABIO PERIMETRAL
 // ============================================================
 labio_alto    = 2.5;
-labio_grosor  = 1.0;
-labio_holgura = 0.4;   // v15: 0.15 → 0.4 para encaje a presión correcto
+labio_grosor  = 2.0;
+labio_holgura = 0.2;   // v4: 0.15 → 0.4 para encaje a presión correcto
 
 // ============================================================
 // LÁMINAS DE ALINEACIÓN (4 lados)
@@ -204,20 +204,30 @@ module base() {
         
         // Tornillos M3
         for (ag = agujeros_montaje) {
+            // 1. Agujero pasante para la rosca
             translate([bx(ag[0]), by(ag[1]), -0.1])
                 cylinder(d=tornillo_d + tolerancia_impresion,
                          h=suelo_grosor + 0.2, $fn=24);
+            
+            // 2. Cono de avellanado (d1 ancho abajo, d2 estrecho arriba)
             translate([bx(ag[0]), by(ag[1]), -0.1])
-                cylinder(d=cabeza_tornillo_d + tolerancia_impresion,
-                         h=suelo_grosor, $fn=24);
+                cylinder(d1=cabeza_tornillo_d + tolerancia_impresion + 0.2,
+                         d2=tornillo_d + tolerancia_impresion,
+                         h=1.25 + 0.1, $fn=24);
         }
         
-        // USB — pared delantera (hasta labio)
-        translate([bx(usb_cx) - usb_abertura_ancho/2,
-                   caja_largo - pared - 0.1,
+       // === USB (Base) ===
+        // 1. Agujero estrecho (interior): deja pasar solo la clavija metálica
+        translate([bx(usb_cx) - usb_abertura_ancho/2, 
+                   caja_largo - pared - 0.1, 
                    pcb_z])
-            cube([usb_abertura_ancho, pared + 0.2,
-                  base_altura - pcb_z + labio_alto + 0.1]);
+            cube([usb_abertura_ancho, pared + 0.2, base_altura - pcb_z + labio_alto + 0.1]);
+        
+        // 2. Rebaje ancho (exterior): vacía la pared por fuera para el encapsulado
+        translate([bx(usb_cx) - (usb_abertura_ancho + 4.0)/2, 
+                   caja_largo - pared + labio_grosor, // <-- Empieza por fuera del labio interior
+                   pcb_z])
+            cube([usb_abertura_ancho + 4.0, (pared - labio_grosor) + 0.2, base_altura - pcb_z + labio_alto + 0.1]);
         
         // SWD — pared derecha (hasta labio)
         translate([caja_ancho - pared - 0.1,
@@ -331,10 +341,25 @@ module tapa() {
         // === ABERTURAS SUPERFICIE ===
         translate([bx(led_verde[0]), by(led_verde[1]), -0.1])
             cylinder(d=ventana_led_3mm, h=techo_grosor + 0.2, $fn=24);
+        
+        
+        
+        
+        
+        
+//******************QUITAR PARA MÁS PROTECCIÓN DEL LED ROJO********************
+        
+        //Hueco para no dejar nada flotante en el agujero del led rojo
+        translate([bx(led_rojo[0]) - 1.9, by(led_rojo[1]) - 4.35, -0.1])
+            cube([4.5, 3.3, techo_grosor + 0.2]);
+        
+        
+        
+        
         //hueco LED rojo ampliado a 3.8x2.7 (+0.5mm por eje)
         // y centrado en X y en Y respecto a led_rojo.
-        translate([bx(led_rojo[0]) - 1.9, by(led_rojo[1]) - 1.35, -0.1])
-            cube([3.8, 2.7, techo_grosor + 0.2]);
+        translate([bx(led_rojo[0]), by(led_rojo[1]), -0.1])
+            cylinder(d=6, h=techo_grosor + 0.2, $fn=24);
             //cylinder(d=ventana_led_3mm, h=techo_grosor + 0.2, $fn=24);
         translate([bx(led_pico[0]), by(led_pico[1]), -0.1])
             cylinder(d=ventana_led_pico, h=techo_grosor + 0.2, $fn=24);
@@ -354,10 +379,16 @@ module tapa() {
             cube([uart_ranura_ancho, uart_ranura_alto, techo_grosor + 0.2]);
         
         // === ABERTURAS PAREDES ===
+        // Muesca de expansión para el conector USB (extra clearance)
+        // === ABERTURAS PAREDES ===
+        // Hueco USB en la tapa (Necesario en versión Slim porque el USB asoma)
+        // Hueco USB en la tapa (Ajustado para versión Slim, no toca el techo)
+        translate([bx(usb_cx) - (usb_abertura_ancho + 4.0)/2, caja_largo - pared - 0.1, th - 6.0])
+            cube([usb_abertura_ancho + 4.0, pared + 0.2, 6.1]);
         *translate([bx(usb_cx) - usb_abertura_ancho/2,
                    caja_largo - pared - 0.1, 0])
             cube([usb_abertura_ancho, pared + 0.2, th + 0.1]);
-        translate([caja_ancho - pared - 0.1,
+        *translate([caja_ancho - pared - 0.1,
                    by(swd_cy) - swd_abertura_ancho/2, 0])
             cube([pared + 2.0, swd_abertura_ancho, th + 0.1]);  
         
@@ -463,5 +494,3 @@ base();
 translate([caja_ancho * 2 + 10, 0, 0])
     mirror([1, 0, 0])
         tapa();
-//
-
