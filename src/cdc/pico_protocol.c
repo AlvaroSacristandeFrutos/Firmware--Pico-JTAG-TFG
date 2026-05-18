@@ -18,8 +18,6 @@
 #include "adc.h"             /* adc_read_vref_mv() */
 #include "board_config.h"    /* PIN_RST, PIN_TRST */
 #include "led.h"             /* led_red_set() */
-#include "uart/uart_driver.h" /* uart_driver_set_baud(), uart_driver_send(), uart_driver_recv() */
-
 #include "hardware/structs/sio.h"
 #include "hardware/watchdog.h"   /* watchdog_update() */
 #include "pico/time.h"    /* busy_wait_us_32() */
@@ -47,6 +45,7 @@
 #define CMD_GET_HW_VERSION  0x12u   /* devuelve u32 versión hardware */
 #define CMD_GET_CLOCK       0x13u   /* devuelve u32 frecuencia actual en kHz */
 #define CMD_SELECT_IF       0x14u   /* selecciona interfaz: 0=JTAG (único soportado) */
+#define CMD_SET_TMS         0x15u   /* fija pin TMS vía SIO sin generar TCK */
 
 #define FIRMWARE_VERSION "PicoAdapter v1.0"
 /* Versión hardware: 1.0.0 en formato SEGGER (Major<<16 | Minor<<8 | Patch) */
@@ -70,11 +69,22 @@ typedef enum {
     ST_RECV_CRC,
 } parser_state_t;
 
-static parser_state_t s_state   = ST_WAIT_START;
-static uint8_t        s_cmd     = 0;
-static uint16_t       s_len     = 0;
-static uint16_t       s_recv    = 0;
-static uint8_t        s_crc_acc = 0;   /* CRC acumulado sobre bytes ya procesados */
+/*
+ * Timeout de frame parcial: si el parser permanece en un estado distinto a
+ * ST_WAIT_START durante más de PARSER_TIMEOUT_US sin recibir ningún byte (p.ej.
+ * por un CDC RX overflow que descartó bytes intermedios), se resetea a
+ * ST_WAIT_START para evitar el stall permanente.
+ */
+#define PARSER_TIMEOUT_US  2000000u   /* 2 s: cubre pausas de fragmentación normales
+                                       * (hasta ~500 ms) y aún permite recuperación
+                                       * antes del PING en el test de overflow (flush=3 s) */
+
+static parser_state_t s_state        = ST_WAIT_START;
+static uint8_t        s_cmd          = 0;
+static uint16_t       s_len          = 0;
+static uint16_t       s_recv         = 0;
+static uint8_t        s_crc_acc      = 0;   /* CRC acumulado sobre bytes ya procesados */
+static uint64_t       s_last_byte_us = 0u;  /* timestamp del último byte recibido */
 static uint8_t        s_payload[MAX_PAYLOAD];
 
 /* Buffer para construir la trama de respuesta completa */
@@ -225,10 +235,11 @@ static void handle_write_tms(const uint8_t *payload, uint16_t len) {
      * número de transacciones DMA de N (bits) a K (transiciones TMS),
      * que en JTAG típico es O(comandos) en lugar de O(bits).
      *
-     * Buffer de ceros para TDI: 64 bytes = 512 bits por llamada DMA.
-     * jtag_pio_write() ya fragmenta internamente en chunks de 512 bits.
+     * Buffer de ceros para TDI: 1022 bytes = 8176 bits = máximo del DMA RX.
+     * Reside en flash (.rodata), sin coste en RAM.
+     * Un único DMA cubre la mayoría de las secuencias TMS reales.
      */
-    static const uint8_t k_zeros[64] = {0u};
+    static const uint8_t k_zeros[1022] = {0u};
 
     uint16_t i = 0u;
     while (i < num_bits) {
@@ -237,7 +248,7 @@ static void handle_write_tms(const uint8_t *payload, uint16_t len) {
 
         /* Contar cuántos bits consecutivos comparten el mismo nivel TMS */
         uint16_t run = 1u;
-        while ((i + run) < num_bits && run < 512u) {
+        while ((i + run) < num_bits && run < 8176u) {
             bool next = (bool)((tms_bytes[(i + run) >> 3u] >> ((i + run) & 7u)) & 1u);
             if (next != tms_val) break;
             run++;
@@ -269,20 +280,16 @@ static void handle_shift_data(const uint8_t *payload, uint16_t len) {
                       | ((uint32_t)payload[2] << 16u)
                       | ((uint32_t)payload[3] << 24u);
     bool     exit_shift = (payload[4] != 0u);
-    uint32_t num_bytes  = (num_bits + 7u) / 8u;
 
-    /*
-     * Validar tamaño. El límite real no es el buffer TDO (4096 bytes) sino
-     * el buffer DMA de recepción en jtag_pio.c (s_rx_words[1022]), que
-     * acota cada transferencia a 1022 bytes = 8176 bits. Superar ese límite
-     * hace que jtag_pio_write_read() devuelva false, pero sin este check
-     * el error solo se detectaría después de procesar el payload completo.
-     */
-    /* Validar num_bits directamente para evitar el overflow u32 en num_bytes.
-     * (num_bits + 7u) desborda si num_bits >= 0xFFFFFFF9, haciendo que num_bytes
-     * sea un valor pequeño incorrecto que esquiva el check num_bytes > 1022u. */
-    if (num_bits > 8176u ||
-        (uint32_t)len < 5u + num_bytes) {
+    /* Validar num_bits antes de calcular num_bytes para evitar overflow u32:
+     * (num_bits + 7u) desborda si num_bits >= 0xFFFFFFF9. El límite real es
+     * el buffer DMA en jtag_pio.c (s_rx_words[1022]) = 1022 bytes = 8176 bits. */
+    if (num_bits == 0u || num_bits > 8176u) {
+        send_resp_error();
+        return;
+    }
+    uint32_t num_bytes = (num_bits + 7u) / 8u;
+    if ((uint32_t)len < 5u + num_bytes) {
         send_resp_error();
         return;
     }
@@ -310,7 +317,7 @@ static void handle_reset_hard(const uint8_t *payload, uint16_t len) {
         ? (uint16_t)((uint16_t)payload[0] | ((uint16_t)payload[1] << 8u))
         : 0u;
     if (ms == 0u)    ms = 10u;
-    if (ms > 1000u)  ms = 1000u;   /* cap: no superar la ventana del watchdog (2 s) */
+    if (ms > 5000u)  ms = 5000u;   /* cap: el bucle alimenta el watchdog cada 100 ms, no hay riesgo de reset */
     sio_hw->gpio_clr = (1u << PIN_RST);
     /* Esperar en chunks de 100 ms para alimentar el watchdog entre iteraciones.
      * Necesario porque cdc_rx_task() puede despachar varios RESET_HARD consecutivos
@@ -402,6 +409,19 @@ static void handle_get_clock(void) {
 }
 
 /*
+ * CMD_SET_TMS — payload: [level: u8]
+ *
+ * Fija el pin TMS (GP19) al nivel indicado vía SIO sin generar ningún pulso
+ * de TCK.  Usado por el bitbang de la DLL para implementar secuencias TMS mixtas
+ * con un único TCK por bit: CMD_SET_TMS(tms) + CMD_SHIFT_DATA(1 bit).
+ */
+static void handle_set_tms(const uint8_t *payload, uint16_t len) {
+    if (len < 1u) { send_resp_error(); return; }
+    jtag_tap_set_tms(payload[0] != 0u);
+    send_resp_ok();
+}
+
+/*
  * CMD_SELECT_IF — payload: [iface: u8]
  *
  * Selecciona la interfaz de depuración:
@@ -438,21 +458,6 @@ static void handle_get_status(void) {
 }
 
 /*
- * CMD_UART_SET_BAUD (0x20) — payload: [baud: u32 LE]
- * Cambia la velocidad de UART0 en tiempo de ejecución.
- */
-static void handle_uart_set_baud(const uint8_t *payload, uint16_t len) {
-    if (len < 4u) { send_resp_error(); return; }
-    uint32_t baud = (uint32_t)payload[0]
-                  | ((uint32_t)payload[1] << 8u)
-                  | ((uint32_t)payload[2] << 16u)
-                  | ((uint32_t)payload[3] << 24u);
-    if (baud == 0u) { send_resp_error(); return; }   /* divisor 0 deja la UART en estado inválido */
-    uart_driver_set_baud(baud);
-    send_resp_ok();
-}
-
-/*
  * CMD_SET_LED — payload: [mask: u8]
  *   bit0 = LED verde (GP14): 1=encendido, 0=apagado
  *   bit1 = LED rojo  (GP15): 1=encendido, 0=apagado
@@ -461,7 +466,11 @@ static void handle_set_led(const uint8_t *payload, uint16_t len) {
     if (len < 1u) { send_resp_error(); return; }
     led_set((payload[0] & 0x01u) != 0u);
     led_red_set((payload[0] & 0x02u) != 0u);
-    send_resp_ok();
+    /* Enviar RESP_OK sin pasar por send_resp_simple, que llamaría
+     * led_red_set(false) y anularía el estado que acabamos de fijar. */
+    uint8_t frame[5] = {PROTO_START, RESP_OK, 0x00u, 0x00u, 0x00u};
+    frame[4] = crc8_block(frame, 4u);
+    cdc_send(frame, 5u);
 }
 
 /* ---------------------------------------------------------------------- */
@@ -512,8 +521,8 @@ static void dispatch(void) {
     case CMD_SELECT_IF:
         handle_select_if(s_payload, s_len);
         break;
-    case CMD_UART_SET_BAUD:
-        handle_uart_set_baud(s_payload, s_len);
+    case CMD_SET_TMS:
+        handle_set_tms(s_payload, s_len);
         break;
     default:
         send_resp_error();
@@ -526,13 +535,23 @@ static void dispatch(void) {
 /* ---------------------------------------------------------------------- */
 
 void protocol_reset(void) {
-    s_state   = ST_WAIT_START;
-    s_recv    = 0u;
-    s_len     = 0u;
-    s_crc_acc = 0u;
+    s_state        = ST_WAIT_START;
+    s_recv         = 0u;
+    s_len          = 0u;
+    s_crc_acc      = 0u;
+    s_last_byte_us = 0u;
 }
 
 void protocol_feed(uint8_t byte) {
+    /* Si el parser lleva más de PARSER_TIMEOUT_US en un estado intermedio sin
+     * recibir bytes (stall por overflow del buffer CDC RX), resetear silenciosamente. */
+    uint64_t now = time_us_64();
+    if (s_state != ST_WAIT_START &&
+            (now - s_last_byte_us) > PARSER_TIMEOUT_US) {
+        s_state = ST_WAIT_START;
+    }
+    s_last_byte_us = now;
+
     switch (s_state) {
 
     case ST_WAIT_START:
@@ -567,9 +586,8 @@ void protocol_feed(uint8_t byte) {
         break;
 
     case ST_RECV_PAYLOAD:
-        /* Almacenar solo si cabe en el buffer; siempre actualizar CRC */
-        if (s_recv < (uint16_t)MAX_PAYLOAD)
-            s_payload[s_recv] = byte;
+        /* s_len <= MAX_PAYLOAD está garantizado por ST_WAIT_LEN_HI; s_recv < s_len */
+        s_payload[s_recv] = byte;
         s_crc_acc = crc8_byte(s_crc_acc, byte);
         s_recv++;
         if (s_recv >= s_len)

@@ -49,6 +49,7 @@ target_link_libraries(jlink_pico_probe
     hardware_uart
     hardware_resets
     hardware_watchdog
+    hardware_adc
     pico_unique_id
 )
 

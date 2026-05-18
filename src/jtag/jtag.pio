@@ -11,6 +11,7 @@
 ;   3. Leer los bytes de TDO de RX FIFO (autopush cada 8 bits)
 ;   El desplazamiento es LSB primero, alineado a byte para DMA
 
+.pio_version 0
 .program jtag_xfer
 .side_set 1 opt
 

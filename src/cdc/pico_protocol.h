@@ -21,10 +21,7 @@ void protocol_feed(uint8_t byte);
  * continuación de una trama anterior. */
 void protocol_reset(void);
 
-/* ---------------------------------------------------------------------- */
-/*  Códigos de comando UART (debug del target)                            */
-/* ---------------------------------------------------------------------- */
-
-#define CMD_UART_SET_BAUD  0x20u   /* payload: u32 LE (Hz)  → RESP_OK   */
-/* CMD_UART_SEND (0x21) y CMD_UART_RECV (0x22) eliminados:
- * el puente UART transparente usa ahora la segunda interfaz CDC (MI_02/MI_03). */
+/* CMD_UART_SET_BAUD (0x20), CMD_UART_SEND (0x21) y CMD_UART_RECV (0x22) eliminados.
+ * El baudrate del puente UART se cambia vía USB SET_LINE_CODING en la interfaz
+ * MI_02 (puente transparente EP4). Los comandos de envío/recepción de datos UART
+ * se realizan directamente sobre esa interfaz CDC sin protocolo PicoAdapter. */

@@ -7,18 +7,38 @@
  */
 #include "jtag.pio.h"
 
+/*
+ * El fichero .pio fija .pio_version 0, por lo que pioasm genera pio_version=0
+ * en el struct jtag_xfer_program.  En RP2350, PICO_PIO_VERSION=1, y la función
+ * pio_add_program() llama hard_assert(pio_can_add_program(...)), que rechaza
+ * programas cuya pio_version no coincida con la del hardware — el firmware entraría
+ * en panic antes de que USB llegase a enumerar.
+ * Las instrucciones PIO son idénticas en v0 y v1 (v1 es un superconjunto), así que
+ * basta reemplazar el campo pio_version con PICO_PIO_VERSION en tiempo de compilación.
+ */
+static const struct pio_program jtag_xfer_program_compat = {
+    .instructions = jtag_xfer_program_instructions,
+    .length       = 8,
+    .origin       = -1,
+    .pio_version  = (int8_t)PICO_PIO_VERSION,
+#if PICO_PIO_VERSION > 0
+    .used_gpio_ranges = 0x0,
+#endif
+};
+#define jtag_xfer_program jtag_xfer_program_compat
+
 #include "hardware/pio.h"
 #include "hardware/dma.h"
 #include "hardware/clocks.h"
 #include "hardware/gpio.h"
 #include "hardware/structs/sio.h"
 #include "hardware/structs/io_bank0.h"
+#include "hardware/structs/pads_bank0.h"
 #include "pico/time.h"
 #include "hardware/watchdog.h"
 
-/* Valores de FUNCSEL para los pines GPIO (RP2040 datasheet, Table 5) */
-#define GPIO_FUNC_SIO   5u
-#define GPIO_FUNC_PIO0  6u
+/* GPIO_FUNC_SIO y GPIO_FUNC_PIO0 se obtienen de hardware/gpio.h —
+ * correctos para RP2040 (5, 6) y RP2350 (31, 7) automáticamente. */
 
 static PIO      s_pio      = pio0;
 static uint     s_sm       = 0;
@@ -53,26 +73,45 @@ static void jtag_pio_recover(void) {
 
 void jtag_pio_init(void) {
     /* ---- TMS, nRST, nTRST → SIO outputs, inactivos (nivel alto) ---- */
-    io_bank0_hw->io[PIN_TMS].ctrl  = GPIO_FUNC_SIO;
-    io_bank0_hw->io[PIN_RST].ctrl  = GPIO_FUNC_SIO;
-    io_bank0_hw->io[PIN_TRST].ctrl = GPIO_FUNC_SIO;
+    /* En RP2350 los pads arrancan aislados (ISO=1); limpiar antes de activar OE. */
+#ifdef PADS_BANK0_GPIO0_ISO_BITS
+    hw_clear_bits_raw(&pads_bank0_hw->io[PIN_TMS],  PADS_BANK0_GPIO0_ISO_BITS);
+    hw_clear_bits_raw(&pads_bank0_hw->io[PIN_RST],  PADS_BANK0_GPIO0_ISO_BITS);
+    hw_clear_bits_raw(&pads_bank0_hw->io[PIN_TRST], PADS_BANK0_GPIO0_ISO_BITS);
+#endif
+    io_bank0_hw->io[PIN_TMS].ctrl  = (io_bank0_hw->io[PIN_TMS].ctrl  & ~0x1Fu) | (uint32_t)GPIO_FUNC_SIO;
+    io_bank0_hw->io[PIN_RST].ctrl  = (io_bank0_hw->io[PIN_RST].ctrl  & ~0x1Fu) | (uint32_t)GPIO_FUNC_SIO;
+    io_bank0_hw->io[PIN_TRST].ctrl = (io_bank0_hw->io[PIN_TRST].ctrl & ~0x1Fu) | (uint32_t)GPIO_FUNC_SIO;
     const uint32_t sio_ctrl_mask =
         (1u << PIN_TMS) | (1u << PIN_RST) | (1u << PIN_TRST);
     sio_hw->gpio_oe_set = sio_ctrl_mask;
     sio_hw->gpio_set    = sio_ctrl_mask;   /* inactivo = alto */
 
     /* ---- Pines de read-back → SIO inputs (OE=0 por defecto) ---- */
-    io_bank0_hw->io[PIN_TDI_RD].ctrl = GPIO_FUNC_SIO;
-    io_bank0_hw->io[PIN_TCK_RD].ctrl = GPIO_FUNC_SIO;
-    io_bank0_hw->io[PIN_TMS_RD].ctrl = GPIO_FUNC_SIO;
+#ifdef PADS_BANK0_GPIO0_ISO_BITS
+    hw_clear_bits_raw(&pads_bank0_hw->io[PIN_TDI_RD], PADS_BANK0_GPIO0_ISO_BITS);
+    hw_clear_bits_raw(&pads_bank0_hw->io[PIN_TCK_RD], PADS_BANK0_GPIO0_ISO_BITS);
+    hw_clear_bits_raw(&pads_bank0_hw->io[PIN_TMS_RD], PADS_BANK0_GPIO0_ISO_BITS);
+#endif
+    io_bank0_hw->io[PIN_TDI_RD].ctrl = (io_bank0_hw->io[PIN_TDI_RD].ctrl & ~0x1Fu) | (uint32_t)GPIO_FUNC_SIO;
+    io_bank0_hw->io[PIN_TCK_RD].ctrl = (io_bank0_hw->io[PIN_TCK_RD].ctrl & ~0x1Fu) | (uint32_t)GPIO_FUNC_SIO;
+    io_bank0_hw->io[PIN_TMS_RD].ctrl = (io_bank0_hw->io[PIN_TMS_RD].ctrl & ~0x1Fu) | (uint32_t)GPIO_FUNC_SIO;
 
     /* ---- CTRL_OE → SIO output, habilitar level-shifter (/OE activo LOW) ---- */
-    io_bank0_hw->io[PIN_CTRL_OE].ctrl = GPIO_FUNC_SIO;
+#ifdef PADS_BANK0_GPIO0_ISO_BITS
+    hw_clear_bits_raw(&pads_bank0_hw->io[PIN_CTRL_OE], PADS_BANK0_GPIO0_ISO_BITS);
+#endif
+    io_bank0_hw->io[PIN_CTRL_OE].ctrl = (io_bank0_hw->io[PIN_CTRL_OE].ctrl & ~0x1Fu) | (uint32_t)GPIO_FUNC_SIO;
     sio_hw->gpio_oe_set = (1u << PIN_CTRL_OE);
     sio_hw->gpio_clr    = (1u << PIN_CTRL_OE);   /* LOW = habilitado */
 
     /* ---- Cargar el programa PIO ---- */
-    s_offset = pio_add_program(s_pio, &jtag_xfer_program);
+    /* pio_add_program devuelve int negativo si el programa no cabe o la versión
+     * PIO no coincide con la plataforma (RP2040=v0, RP2350=v1). Si falla, el
+     * cast a uint produciría un offset enorme que corrompería toda la memoria PIO. */
+    int pio_load_offset = pio_add_program(s_pio, &jtag_xfer_program);
+    if (pio_load_offset < 0) { while (true); }  /* no debería ocurrir */
+    s_offset = (uint)pio_load_offset;
 
     pio_sm_config c = jtag_xfer_program_get_default_config(s_offset);
     sm_config_set_out_pins(&c, PIN_TDI, 1);         /* OUT  → TDI (GP16) */
@@ -103,9 +142,14 @@ void jtag_pio_init(void) {
     pio_sm_set_consecutive_pindirs(s_pio, s_sm, PIN_TCK, 1, true);   /* salida */
 
     /* Conectar TDI, TDO y TCK al PIO0 */
-    io_bank0_hw->io[PIN_TDI].ctrl = GPIO_FUNC_PIO0;
-    io_bank0_hw->io[PIN_TDO].ctrl = GPIO_FUNC_PIO0;
-    io_bank0_hw->io[PIN_TCK].ctrl = GPIO_FUNC_PIO0;
+#ifdef PADS_BANK0_GPIO0_ISO_BITS
+    hw_clear_bits_raw(&pads_bank0_hw->io[PIN_TDI], PADS_BANK0_GPIO0_ISO_BITS);
+    hw_clear_bits_raw(&pads_bank0_hw->io[PIN_TDO], PADS_BANK0_GPIO0_ISO_BITS);
+    hw_clear_bits_raw(&pads_bank0_hw->io[PIN_TCK], PADS_BANK0_GPIO0_ISO_BITS);
+#endif
+    io_bank0_hw->io[PIN_TDI].ctrl = (io_bank0_hw->io[PIN_TDI].ctrl & ~0x1Fu) | (uint32_t)GPIO_FUNC_PIO0;
+    io_bank0_hw->io[PIN_TDO].ctrl = (io_bank0_hw->io[PIN_TDO].ctrl & ~0x1Fu) | (uint32_t)GPIO_FUNC_PIO0;
+    io_bank0_hw->io[PIN_TCK].ctrl = (io_bank0_hw->io[PIN_TCK].ctrl & ~0x1Fu) | (uint32_t)GPIO_FUNC_PIO0;
 
     /* Inicializar y arrancar la state machine */
     pio_sm_init(s_pio, s_sm, s_offset, &c);
@@ -297,10 +341,12 @@ bool jtag_pio_write_read_exit(const uint8_t *tdi_buf, uint8_t *tdo_buf,
 }
 
 bool jtag_pio_write(const uint8_t *tdi_buf, uint32_t len_bits) {
-    static uint8_t tdo_discard[64];   /* 512 bits por iteración como máximo */
+    /* Buffer de descarte: mismo tamaño que s_rx_words (1022 bytes = 8176 bits),
+     * que es el máximo que acepta jtag_pio_write_read en una sola llamada DMA. */
+    static uint8_t tdo_discard[1022];
 
     while (len_bits > 0u) {
-        uint32_t chunk_bits  = (len_bits > 512u) ? 512u : len_bits;
+        uint32_t chunk_bits  = (len_bits > 8176u) ? 8176u : len_bits;
         uint32_t chunk_bytes = (chunk_bits + 7u) / 8u;
 
         if (!jtag_pio_write_read(tdi_buf, tdo_discard, chunk_bits))

@@ -31,7 +31,7 @@ _Static_assert((CDC_RX_BUF_SIZE & (CDC_RX_BUF_SIZE - 1u)) == 0u,
 
 static uint8_t           s_rx_buf[CDC_RX_BUF_SIZE];
 static volatile uint16_t s_rx_head = 0;   /* escrito por ISR  */
-static uint16_t          s_rx_tail = 0;   /* leído por main   */
+static volatile uint16_t s_rx_tail = 0;   /* leído por main, reseteado por ISR (bus reset) */
 
 /* ---------------------------------------------------------------------- */
 
@@ -49,6 +49,7 @@ void cdc_rx_push(const uint8_t *data, uint16_t len) {
         uint16_t next_head = (s_rx_head + 1u) & CDC_RX_BUF_MASK;
         if (next_head != s_rx_tail) {   /* buffer no lleno */
             s_rx_buf[s_rx_head] = data[i];
+            __asm volatile("" ::: "memory");   /* barrera compilador: visible antes de avanzar head */
             s_rx_head = next_head;
         }
     }

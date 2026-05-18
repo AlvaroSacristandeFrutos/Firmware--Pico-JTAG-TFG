@@ -118,7 +118,7 @@ static const struct usb_endpoint_descriptor uart_ep_data_in = {
 /*  Descriptor de dispositivo                                              */
 /* ---------------------------------------------------------------------- */
 
-static const struct usb_device_descriptor device_descriptor = {
+static const struct usb_device_descriptor device_descriptor __attribute__((aligned(4))) = {
     .bLength            = sizeof(struct usb_device_descriptor),
     .bDescriptorType    = USB_DT_DEVICE,
     .bcdUSB             = 0x0200,
@@ -166,7 +166,7 @@ static const struct usb_device_descriptor device_descriptor = {
 /*    [  7] EP4 IN  bulk (datos device→host, 0x84)                       */
 /*  TOTAL = 75 + 66 = 141 bytes = 0x8D                                   */
 /* ---------------------------------------------------------------------- */
-static const uint8_t s_config_desc[] = {
+static const uint8_t s_config_desc[] __attribute__((aligned(4))) = {
     /* --- Cabecera de configuración (9 bytes) --- */
     0x09, 0x02,         /* bLength=9, bDescriptorType=CONFIGURATION */
     0x8D, 0x00,         /* wTotalLength=141 (LE) */
@@ -321,7 +321,7 @@ static const uint8_t s_config_desc[] = {
 /*  Descriptores de cadena                                                 */
 /* ---------------------------------------------------------------------- */
 
-static const unsigned char lang_descriptor[] = {
+static const unsigned char lang_descriptor[] __attribute__((aligned(4))) = {
     4, USB_DT_STRING, 0x09, 0x04   /* English (US) */
 };
 

@@ -25,12 +25,11 @@
 #include "uart/uart_driver.h"
 #include "uart/uart_bridge.h"
 
-#include "hardware/regs/addressmap.h"
 #include "hardware/watchdog.h"
-#define TIMER_TIMELR    (*(volatile uint32_t *)(TIMER_BASE + 0x0Cu))
+#include "pico/time.h"
 
-static uint32_t time_us(void) {
-    return TIMER_TIMELR;
+static inline uint32_t time_us(void) {
+    return time_us_32();
 }
 
 /* ---------------------------------------------------------------------- */

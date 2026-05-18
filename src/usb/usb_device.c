@@ -19,6 +19,7 @@
 #include "cdc/cdc_rx.h"
 #include "cdc/pico_protocol.h"
 #include "uart/uart_driver.h"
+#include "uart/uart_bridge.h"
 
 #include <string.h>
 #include "hardware/regs/usb.h"
@@ -44,7 +45,7 @@ static volatile bool configured = false;
  * Para cada GET_DESCRIPTOR, copiamos los datos aquí y enviamos en trozos
  * de 64 bytes desde ep0_in_handler hasta agotar ep0_pending_total.
  */
-static uint8_t  ep0_pending_buf[192];
+static uint8_t  ep0_pending_buf[192] __attribute__((aligned(4)));
 static uint16_t ep0_pending_total = 0;   /* bytes totales a enviar */
 static uint16_t ep0_pending_sent  = 0;   /* bytes ya enviados */
 
@@ -113,7 +114,10 @@ void usb_start_transfer(struct usb_endpoint_configuration *ep,
 
     if (ep_is_tx(ep)) {
         if (len > 0) {
-            memcpy((void *)ep->data_buffer, buf, len);
+            /* Misma razón que en usb_ep0_in_begin: redondear al múltiplo de 4
+             * para evitar STRH a dirección impar con UNALIGN_TRP=1 (RES1 en RP2350). */
+            uint16_t clen = (uint16_t)((len + 3u) & ~3u);
+            memcpy((void *)ep->data_buffer, buf, clen);
         }
         val |= USB_BUF_CTRL_FULL;
     }
@@ -121,9 +125,16 @@ void usb_start_transfer(struct usb_endpoint_configuration *ep,
     val |= ep->next_pid ? USB_BUF_CTRL_DATA1_PID : USB_BUF_CTRL_DATA0_PID;
     ep->next_pid ^= 1u;
 
-    /* Workaround RP2040-E5 */
+    /* El controlador USB requiere escribir AVAIL en dos pasos separados por al
+     * menos 12 ciclos. En RP2040 es la errata E5; en RP2350 el mismo núcleo USB
+     * comparte el requisito — TinyUSB lo aplica en todos los chips sin excepción
+     * (rp2040_usb.c línea 110). Un write directo con AVAIL=1 en RP2350 hace que
+     * el hardware ignore el buffer: EP0 OUT nunca genera BUFF_STATUS y cualquier
+     * Control OUT con fase de datos (SET_LINE_CODING, etc.) se cuelga. */
     *ep->buffer_control = val & ~USB_BUF_CTRL_AVAIL;
-    busy_wait_at_least_cycles(12);
+    __asm volatile("dmb" ::: "memory");
+    busy_wait_at_least_cycles(20);
+    __asm volatile("dmb" ::: "memory");
     *ep->buffer_control = val;
 }
 
@@ -142,7 +153,17 @@ static void usb_ep0_in_begin(const uint8_t *data, uint16_t total, uint16_t wLeng
     if (total > wLength)             total = wLength;
     if (total > sizeof(ep0_pending_buf)) total = sizeof(ep0_pending_buf);
 
-    if (total > 0) memcpy(ep0_pending_buf, data, total);
+    if (total > 0) {
+        /* Redondear al siguiente múltiplo de 4 para evitar que el tail del
+         * memcpy genere un STRH a dirección impar. En RP2350 (M33) UNALIGN_TRP
+         * es RES1: los accesos halfword no alineados siempre hacen UsageFault.
+         * Los bytes extra copiados son padding dentro de ep0_pending_buf; nunca
+         * se transmiten porque usb_start_transfer usa la longitud real (total). */
+        uint16_t clen = (uint16_t)((total + 3u) & ~3u);
+        if (clen > (uint16_t)sizeof(ep0_pending_buf))
+            clen = (uint16_t)sizeof(ep0_pending_buf);
+        memcpy(ep0_pending_buf, data, clen);
+    }
     ep0_pending_total = total;
     ep0_pending_sent  = 0;
 
@@ -173,7 +194,8 @@ static void usb_handle_config_descriptor(volatile struct usb_setup_packet *pkt) 
 
 static void usb_handle_string_descriptor(volatile struct usb_setup_packet *pkt) {
     uint8_t i = pkt->wValue & 0xff;
-    uint8_t tmp[64];
+    uint32_t tmp_aligned[16];
+    uint8_t *tmp = (uint8_t *)tmp_aligned;
     uint8_t len = 0;
 
     if (i == 0) {
@@ -329,7 +351,8 @@ static void usb_handle_setup_packet(void) {
             /* Responder para ambas interfaces; wIndex!=2 devuelve 115200 8N1 fijo */
             uint32_t baud = ((pkt->wIndex & 0xFFu) == 2u)
                             ? uart_driver_get_baud() : 115200u;
-            uint8_t lc[7];
+            uint32_t lc_aligned[2];
+            uint8_t *lc = (uint8_t *)lc_aligned;
             lc[0] = (uint8_t)(baud);
             lc[1] = (uint8_t)(baud >> 8);
             lc[2] = (uint8_t)(baud >> 16);
@@ -367,10 +390,13 @@ static void usb_handle_buff_done(uint ep_num, bool in) {
     }
 }
 
+/* EP4 es el endpoint de mayor número → (4+1)*2 = 10 bits en buf_status */
+#define USB_BUF_STATUS_BITS  10u
+
 static void usb_handle_buff_status(uint32_t buffers) {
     uint32_t remaining = buffers;
     uint32_t bit = 1u;
-    for (uint i = 0; remaining && i < 5 * 2; i++) {
+    for (uint i = 0; remaining && i < USB_BUF_STATUS_BITS; i++) {
         if (remaining & bit) {
             usb_hw_clear->buf_status = bit;
             usb_handle_buff_done(i >> 1u, !(i & 1u));
@@ -415,6 +441,13 @@ static void usb_bus_reset(void) {
         if (dev_config.endpoints[i].descriptor)
             dev_config.endpoints[i].next_pid = 0;
     }
+
+    /* Vaciar los buffers circulares de recepción CDC y de transmisión UART.
+     * Sin este flush, los bytes de la sesión anterior se procesarían tras
+     * la re-enumeración: el parser CDC podría ejecutar comandos obsoletos y
+     * el bridge UART enviaría datos de sesiones anteriores al target. */
+    cdc_rx_init();
+    uart_bridge_init();
 }
 
 /* ---------------------------------------------------------------------- */
@@ -625,6 +658,9 @@ void usb_device_init(void) {
                 | USB_USB_PWR_VBUS_DETECT_OVERRIDE_EN_BITS;
 
     usb_hw->main_ctrl = USB_MAIN_CTRL_CONTROLLER_EN_BITS;
+#ifdef USB_MAIN_CTRL_PHY_ISO_BITS
+    usb_hw_clear->main_ctrl = USB_MAIN_CTRL_PHY_ISO_BITS;
+#endif
 
     usb_hw->sie_ctrl = USB_SIE_CTRL_EP0_INT_1BUF_BITS;
 

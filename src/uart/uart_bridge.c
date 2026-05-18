@@ -33,7 +33,7 @@ _Static_assert((TX_BUF_SIZE & (TX_BUF_SIZE - 1u)) == 0u,
 
 static uint8_t           s_tx_buf[TX_BUF_SIZE];
 static volatile uint16_t s_tx_head = 0u;   /* escrito por ISR  */
-static          uint16_t s_tx_tail = 0u;   /* leído por main   */
+static volatile uint16_t s_tx_tail = 0u;   /* leído por main, reseteado por ISR (bus reset) */
 
 void uart_bridge_init(void) {
     s_tx_head = 0u;
@@ -47,6 +47,7 @@ void uart_data_out_handler(uint8_t *buf, uint16_t len) {
         uint16_t next = (s_tx_head + 1u) & TX_BUF_MASK;
         if (next != s_tx_tail) {   /* descartar silenciosamente si lleno */
             s_tx_buf[s_tx_head] = buf[i];
+            __asm volatile("" ::: "memory");   /* barrera compilador: visible antes de avanzar head */
             s_tx_head = next;
         }
     }

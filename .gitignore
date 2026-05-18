@@ -1,16 +1,15 @@
 # Salida de compilación
 build/
+build_pico2/
 out/
 
 # IDEs
 .vs/
 .vscode/
 
-# Node.js
-node_modules/
-
 # Tests locales (no se suben al repositorio)
 test/
+pytest.ini
 
 # Documentación y ficheros de explicación generados
 TFG_CONTENIDO_COMPLETO.txt
