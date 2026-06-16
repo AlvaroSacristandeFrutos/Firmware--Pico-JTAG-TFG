@@ -1,5 +1,5 @@
 #include "jtag_tap.h"
-#include "jtag_pio.h"
+#include "jtag_bb.h"
 #include "board_config.h"
 
 #include "hardware/structs/sio.h"
@@ -7,9 +7,9 @@
 /*
  * Máquina de estados TAP del estándar IEEE 1149.1.
  *
- * TMS se controla por SIO (GP19); TCK/TDI/TDO los gestiona el PIO.
+ * TMS, TCK, TDI y TDO se controlan todos por SIO (bitbanging).
  * Las funciones de navegación entre estados envían pulsos de TCK
- * mediante jtag_pio_write() con un buffer de ceros (TDI=0) y TMS
+ * mediante jtag_bb_write() con un buffer de ceros (TDI=0) y TMS
  * fijo al nivel que se haya establecido con tms_set().
  *
  * Diagrama de estados abreviado (desde Run-Test/Idle):
@@ -22,8 +22,7 @@
  */
 
 /* Buffer de TDI=0 para navegación sin datos.
- * Tamaño = 1022 bytes = 8176 bits, igual al límite máximo del motor PIO+DMA,
- * de modo que pulse_tck() no haga más transferencias DMA de las necesarias. */
+ * Tamaño = 1022 bytes = 8176 bits, límite máximo de jtag_bb_write_read(). */
 static const uint8_t k_zeros[1022] = {0};
 
 static void tms_set(bool level) {
@@ -37,7 +36,7 @@ static void tms_set(bool level) {
 static void pulse_tck(uint32_t n) {
     while (n > 0u) {
         uint32_t chunk = (n > 8176u) ? 8176u : n;
-        jtag_pio_write(k_zeros, chunk);
+        jtag_bb_write(k_zeros, chunk);
         n -= chunk;
     }
 }
@@ -68,14 +67,14 @@ void jtag_tap_shift_ir(const uint8_t *ir_data, uint32_t ir_len) {
 
     /* Desplazar los primeros ir_len-1 bits con TMS=0 (TDO se descarta) */
     if (ir_len > 1u) {
-        jtag_pio_write(ir_data, ir_len - 1u);
+        jtag_bb_write(ir_data, ir_len - 1u);
     }
 
     /* Último bit con TMS=1 → Exit1-IR */
     uint8_t last_tdi = (ir_data[(ir_len - 1u) / 8u] >> ((ir_len - 1u) & 7u)) & 1u;
     uint8_t tdo_last;
     tms_set(true);
-    jtag_pio_write_read(&last_tdi, &tdo_last, 1u);
+    jtag_bb_write_read(&last_tdi, &tdo_last, 1u);
 
     /* Update-IR (TMS sigue en 1), luego RTI */
     pulse_tck(1);
@@ -94,16 +93,16 @@ void jtag_tap_shift_dr(const uint8_t *tdi_data, uint8_t *tdo_data,
     /* Desplazar los primeros dr_len-1 bits con TMS=0, capturando TDO si hay buffer */
     if (dr_len > 1u) {
         if (tdo_data)
-            jtag_pio_write_read(tdi_data, tdo_data, dr_len - 1u);
+            jtag_bb_write_read(tdi_data, tdo_data, dr_len - 1u);
         else
-            jtag_pio_write(tdi_data, dr_len - 1u);
+            jtag_bb_write(tdi_data, dr_len - 1u);
     }
 
     /* Último bit con TMS=1 → Exit1-DR */
     uint8_t last_tdi = (tdi_data[(dr_len - 1u) / 8u] >> ((dr_len - 1u) & 7u)) & 1u;
     uint8_t tdo_last;
     tms_set(true);
-    jtag_pio_write_read(&last_tdi, &tdo_last, 1u);
+    jtag_bb_write_read(&last_tdi, &tdo_last, 1u);
 
     /* Almacenar el último bit TDO en tdo_data si se proporcionó buffer */
     if (tdo_data) {
@@ -111,7 +110,7 @@ void jtag_tap_shift_dr(const uint8_t *tdi_data, uint8_t *tdo_data,
         uint32_t last_bit         = (dr_len - 1u) & 7u;
         uint32_t first_call_bytes = (dr_len > 1u) ? ((dr_len - 1u + 7u) / 8u) : 0u;
         if (last_byte >= first_call_bytes) {
-            /* Byte no tocado por jtag_pio_write_read → inicializar en lugar de RMW */
+            /* Byte no tocado por jtag_bb_write_read → inicializar en lugar de RMW */
             tdo_data[last_byte] = (uint8_t)((tdo_last & 1u) << last_bit);
         } else {
             tdo_data[last_byte] = (uint8_t)(

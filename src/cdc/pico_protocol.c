@@ -13,7 +13,7 @@
 
 #include "pico_protocol.h"
 #include "usb_device.h"      /* cdc_send() */
-#include "jtag_pio.h"        /* jtag_pio_write_read(), jtag_pio_write(), jtag_set_freq(), jtag_get_freq() */
+#include "jtag_bb.h"         /* jtag_bb_write_read(), jtag_bb_write(), jtag_set_freq(), jtag_get_freq() */
 #include "jtag_tap.h"        /* jtag_tap_reset(), jtag_tap_set_tms() */
 #include "adc.h"             /* adc_read_vref_mv() */
 #include "board_config.h"    /* PIN_RST, PIN_TRST */
@@ -46,6 +46,9 @@
 #define CMD_GET_CLOCK       0x13u   /* devuelve u32 frecuencia actual en kHz */
 #define CMD_SELECT_IF       0x14u   /* selecciona interfaz: 0=JTAG (único soportado) */
 #define CMD_SET_TMS         0x15u   /* fija pin TMS vía SIO sin generar TCK */
+#define CMD_GET_PIN_STATE   0x16u   /* lee TDI_RD/TCK_RD/TMS_RD/TDO/GP0 → u8 */
+#define CMD_PIO_DIAG        0x30u   /* diagnóstico hardware: 6×u32 (gpio_in, io_ctrl, pads, gpio_oe, 0, 0) */
+#define CMD_SW_JTAG_IDCODE  0x31u   /* IDCODE por bitbanging SIO → u32 LE */
 
 #define FIRMWARE_VERSION "PicoAdapter v1.0"
 /* Versión hardware: 1.0.0 en formato SEGGER (Major<<16 | Minor<<8 | Patch) */
@@ -206,10 +209,10 @@ static void handle_set_clock(const uint8_t *payload, uint16_t len) {
  *
  * Para cada bit i:
  *   1. Extraer el bit i del array tmsBytes y fijar TMS con jtag_tap_set_tms()
- *   2. Generar 1 pulso de TCK con jtag_pio_write() con TDI=0
+ *   2. Generar 1 pulso de TCK con jtag_bb_write() con TDI=0
  *
- * TMS es controlado por SIO (GP19); TCK/TDI lo gestiona el PIO.
- * jtag_pio_write() con un buffer de ceros y len_bits=1 genera exactamente
+ * TMS, TCK y TDI se controlan todos por SIO (bitbanging).
+ * jtag_bb_write() con un buffer de ceros y len_bits=1 genera exactamente
  * un ciclo de reloj JTAG.
  */
 static void handle_write_tms(const uint8_t *payload, uint16_t len) {
@@ -228,16 +231,15 @@ static void handle_write_tms(const uint8_t *payload, uint16_t len) {
 
     /*
      * Optimización: agrupar bits consecutivos con el mismo nivel de TMS
-     * y enviarlos en una única llamada DMA en lugar de un DMA por bit.
+     * y enviarlos en una única llamada jtag_bb_write() en lugar de una por bit.
      *
-     * TMS se controla por SIO (pin fijo entre pulsos del mismo nivel);
-     * TCK lo genera el PIO para el bloque completo.  Esto reduce el
-     * número de transacciones DMA de N (bits) a K (transiciones TMS),
+     * TMS se fija por SIO y permanece constante durante la ráfaga;
+     * TCK/TDI los genera jtag_bb_write() para el bloque completo.
+     * Esto reduce los cambios de TMS de N (bits) a K (transiciones TMS),
      * que en JTAG típico es O(comandos) en lugar de O(bits).
      *
-     * Buffer de ceros para TDI: 1022 bytes = 8176 bits = máximo del DMA RX.
-     * Reside en flash (.rodata), sin coste en RAM.
-     * Un único DMA cubre la mayoría de las secuencias TMS reales.
+     * Buffer de ceros para TDI: 1022 bytes = 8176 bits = límite máximo de
+     * jtag_bb_write_read(). Reside en flash (.rodata), sin coste en RAM.
      */
     static const uint8_t k_zeros[1022] = {0u};
 
@@ -254,8 +256,8 @@ static void handle_write_tms(const uint8_t *payload, uint16_t len) {
             run++;
         }
 
-        /* Generar 'run' pulsos TCK en una sola operación DMA */
-        if (!jtag_pio_write(k_zeros, (uint32_t)run)) {
+        /* Generar 'run' pulsos TCK mediante bitbanging SIO */
+        if (!jtag_bb_write(k_zeros, (uint32_t)run)) {
             send_resp_error();
             return;
         }
@@ -283,7 +285,7 @@ static void handle_shift_data(const uint8_t *payload, uint16_t len) {
 
     /* Validar num_bits antes de calcular num_bytes para evitar overflow u32:
      * (num_bits + 7u) desborda si num_bits >= 0xFFFFFFF9. El límite real es
-     * el buffer DMA en jtag_pio.c (s_rx_words[1022]) = 1022 bytes = 8176 bits. */
+     * el límite de jtag_bb_write_read (8176 bits = 1022 bytes). */
     if (num_bits == 0u || num_bits > 8176u) {
         send_resp_error();
         return;
@@ -296,7 +298,7 @@ static void handle_shift_data(const uint8_t *payload, uint16_t len) {
     const uint8_t *tdi = payload + 5u;
 
     led_toggle();   /* parpadeo verde: inicio transferencia */
-    bool ok = jtag_pio_write_read_exit(tdi, s_tdo_buf, num_bits, exit_shift);
+    bool ok = jtag_bb_write_read_exit(tdi, s_tdo_buf, num_bits, exit_shift);
     led_toggle();   /* parpadeo verde: fin transferencia */
 
     if (!ok) {
@@ -473,6 +475,46 @@ static void handle_set_led(const uint8_t *payload, uint16_t len) {
     cdc_send(frame, 5u);
 }
 
+/*
+ * CMD_GET_PIN_STATE — sin payload
+ * Devuelve 1 byte: bit0=TDI_RD, bit1=TCK_RD, bit2=TMS_RD, bit3=TDO, bit4=GP0
+ */
+static void handle_get_pin_state(void) {
+    uint32_t in = sio_hw->gpio_in;
+    uint8_t val = (uint8_t)(
+        (((in >> PIN_TDI_RD) & 1u) << 0u) |
+        (((in >> PIN_TCK_RD) & 1u) << 1u) |
+        (((in >> PIN_TMS_RD) & 1u) << 2u) |
+        (((in >> PIN_TDO)    & 1u) << 3u) |
+        (((in >> 0u)         & 1u) << 4u));
+    send_resp_data(&val, 1u);
+}
+
+/*
+ * CMD_PIO_DIAG (0x30) — sin payload
+ * Devuelve 24 bytes: 6 registros hardware u32 LE (gpio_in, io_ctrl, pads, gpio_oe, 0, 0).
+ */
+static void handle_pio_diag(void) {
+    uint8_t buf[24];
+    jtag_get_diag(buf);
+    send_resp_data(buf, 24u);
+}
+
+/*
+ * CMD_SW_JTAG_IDCODE (0x31) — sin payload
+ * Devuelve 4 bytes (u32 LE): IDCODE leído por bitbanging SIO.
+ */
+static void handle_sw_jtag_idcode(void) {
+    uint32_t id = jtag_bb_read_idcode();
+    uint8_t buf[4] = {
+        (uint8_t)( id        & 0xFFu),
+        (uint8_t)((id >>  8) & 0xFFu),
+        (uint8_t)((id >> 16) & 0xFFu),
+        (uint8_t)((id >> 24) & 0xFFu),
+    };
+    send_resp_data(buf, 4u);
+}
+
 /* ---------------------------------------------------------------------- */
 /*  Dispatcher                                                             */
 /* ---------------------------------------------------------------------- */
@@ -523,6 +565,15 @@ static void dispatch(void) {
         break;
     case CMD_SET_TMS:
         handle_set_tms(s_payload, s_len);
+        break;
+    case CMD_GET_PIN_STATE:
+        handle_get_pin_state();
+        break;
+    case CMD_PIO_DIAG:
+        handle_pio_diag();
+        break;
+    case CMD_SW_JTAG_IDCODE:
+        handle_sw_jtag_idcode();
         break;
     default:
         send_resp_error();

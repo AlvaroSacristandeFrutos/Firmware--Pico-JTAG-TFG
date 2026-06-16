@@ -42,7 +42,7 @@ void gpio_init_all(void) {
 
     /* LEDs externos del PCB.
      * El resto de pines se configuran dentro de su módulo correspondiente:
-     *   - JTAG (GP16-GP22): en jtag_pio_init()
+     *   - JTAG (GP16-GP22): en jtag_bb_init()
      *   - UART (GP12-GP13): en uart_driver_init()
      *   - ADC  (GP26):      en adc_sense_init()        */
     gpio_set_output(PIN_LED);         /* GP14 — LED verde    */

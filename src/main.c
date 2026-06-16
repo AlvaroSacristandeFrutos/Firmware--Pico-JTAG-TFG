@@ -3,7 +3,7 @@
  *
  * El firmware recibe comandos del PC a través del puerto COM virtual USB-CDC
  * (VID 0x2E8A / PID 0x000A, "Raspberry Pi Pico") y los despacha al motor
- * JTAG PIO+DMA.  El protocolo serie está implementado en pico_protocol.c.
+ * JTAG bitbang (SIO).  El protocolo serie está implementado en pico_protocol.c.
  *
  * Core 0:
  *   - Atiende USB (interrupt-driven, usb_device_task() es un no-op)
@@ -20,7 +20,7 @@
 #include "util/led.h"
 #include "util/adc.h"
 #include "usb/usb_device.h"
-#include "jtag/jtag_pio.h"
+#include "jtag/jtag_bb.h"
 #include "cdc/cdc_rx.h"
 #include "uart/uart_driver.h"
 #include "uart/uart_bridge.h"
@@ -38,7 +38,7 @@ static inline uint32_t time_us(void) {
 int main(void) {
     gpio_init_all();
     adc_sense_init();
-    jtag_pio_init();
+    jtag_bb_init();
     uart_driver_init(115200u);
     uart_bridge_init();
     cdc_rx_init();
