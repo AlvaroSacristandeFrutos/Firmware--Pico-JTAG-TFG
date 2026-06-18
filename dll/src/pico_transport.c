@@ -7,6 +7,26 @@
 #include <stdio.h>
 
 /* ---------------------------------------------------------------------- */
+/*  Log de diagnóstico — C:\pico_log.txt                                  */
+/* ---------------------------------------------------------------------- */
+
+static void pico_log(const char *fmt, ...) {
+    FILE *f = fopen("C:\\pico_log.txt", "a");
+    if (!f) return;
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    fprintf(f, "[%02d:%02d:%02d.%03d] ", st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
+    va_list ap;
+    va_start(ap, fmt);
+    vfprintf(f, fmt, ap);
+    va_end(ap);
+    fputc('\n', f);
+    fclose(f);
+}
+
+#include <stdarg.h>
+
+/* ---------------------------------------------------------------------- */
 /*  CRC8 (polinomio 0x07, semilla 0x00) — mismo algoritmo que el firmware */
 /* ---------------------------------------------------------------------- */
 
@@ -201,10 +221,14 @@ bool pico_recv(HANDLE h,
 
     /* Leer cabecera: [0xA5][RESP][len_lo][len_hi] */
     uint8_t hdr[4];
-    if (!ReadFile(h, hdr, 4u, &got, NULL) || got != 4u)
+    if (!ReadFile(h, hdr, 4u, &got, NULL) || got != 4u) {
+        pico_log("  recv: header timeout got=%lu", got);
         return false;
-    if (hdr[0] != 0xA5u)
+    }
+    if (hdr[0] != 0xA5u) {
+        pico_log("  recv: bad magic 0x%02X", hdr[0]);
         return false;
+    }
 
     *out_resp = hdr[1];
     uint16_t len = (uint16_t)hdr[2] | ((uint16_t)hdr[3] << 8u);
@@ -231,8 +255,10 @@ bool pico_recv(HANDLE h,
     for (uint16_t i = 0; i < len; i++)
         expected = crc8_update(expected, out_payload[i]);
 
-    if (crc_byte != expected)
+    if (crc_byte != expected) {
+        pico_log("  recv: CRC mismatch got=0x%02X expected=0x%02X", crc_byte, expected);
         return false;
+    }
 
     *out_len = len;
     return true;
@@ -249,16 +275,24 @@ bool pico_transact(HANDLE h,
                    const uint8_t *tx,      uint16_t  tx_len,
                    uint8_t       *rx,      uint16_t *rx_len,
                    uint32_t       timeout_ms) {
-    if (!pico_send(h, cmd, tx, tx_len))
+    if (!pico_send(h, cmd, tx, tx_len)) {
+        pico_log("SEND FAIL cmd=0x%02X", cmd);
         return false;
+    }
 
     uint8_t  resp;
     uint16_t len = 0;
-    if (!pico_recv(h, &resp, s_rx_buf, &len, timeout_ms))
+    if (!pico_recv(h, &resp, s_rx_buf, &len, timeout_ms)) {
+        pico_log("RECV FAIL cmd=0x%02X timeout=%ums", cmd, timeout_ms);
         return false;
+    }
 
-    if (resp == RESP_ERROR)
+    if (resp == RESP_ERROR) {
+        pico_log("RESP_ERROR cmd=0x%02X", cmd);
         return false;
+    }
+
+    pico_log("OK cmd=0x%02X resp=0x%02X len=%u", cmd, resp, len);
 
     if (rx && rx_len) {
         memcpy(rx, s_rx_buf, len);

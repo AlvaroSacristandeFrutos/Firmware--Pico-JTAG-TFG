@@ -93,9 +93,14 @@ const char * __cdecl JLINKARM_OpenEx(const char *log, void *reserved) {
     if (g_is_open)
         return NULL;   /* ya abierto */
 
+    { FILE *f = fopen("C:\\pico_log.txt","a"); if(f){fprintf(f,"--- OpenEx ---\n");fclose(f);} }
+
     char port[32];
-    if (!pico_detect(port, sizeof(port)))
+    if (!pico_detect(port, sizeof(port))) {
+        { FILE *f = fopen("C:\\pico_log.txt","a"); if(f){fprintf(f,"pico_detect FAILED\n");fclose(f);} }
         return "PicoAdapter not found";
+    }
+    { FILE *f = fopen("C:\\pico_log.txt","a"); if(f){fprintf(f,"pico_detect OK port=%s\n",port);fclose(f);} }
 
     g_hCOM = pico_port_open(port);
     if (g_hCOM == INVALID_HANDLE_VALUE)
@@ -115,6 +120,26 @@ const char * __cdecl JLINKARM_OpenEx(const char *log, void *reserved) {
                 h *= 16777619u;
             }
             g_serial = h % 1000000000u;
+        }
+    }
+
+    /* Diagnóstico de hardware: leer tensión Vref y estados de pines JTAG */
+    {
+        uint8_t  rx[PICO_MAX_PAYLOAD]; uint16_t rx_len = 0u;
+        /* Vref */
+        if (pico_transact(g_hCOM, 0x06u, NULL, 0u, rx, &rx_len, 500u) && rx_len >= 2u) {
+            uint16_t mv = (uint16_t)rx[0] | ((uint16_t)rx[1] << 8u);
+            FILE *f=fopen("C:\\pico_log.txt","a"); if(f){fprintf(f,"Vref=%u mV\n",mv);fclose(f);}
+        }
+        /* Pin state: bit0=TDI_RD bit1=TCK_RD bit2=TMS_RD bit3=TDO bit4=GP0 */
+        rx_len = 0u;
+        if (pico_transact(g_hCOM, 0x16u, NULL, 0u, rx, &rx_len, 500u) && rx_len >= 1u) {
+            FILE *f=fopen("C:\\pico_log.txt","a");
+            if(f){
+                fprintf(f,"PinState=0x%02X TDI_RD=%d TCK_RD=%d TMS_RD=%d TDO=%d\n",
+                    rx[0], (rx[0]>>0)&1, (rx[0]>>1)&1, (rx[0]>>2)&1, (rx[0]>>3)&1);
+                fclose(f);
+            }
         }
     }
 

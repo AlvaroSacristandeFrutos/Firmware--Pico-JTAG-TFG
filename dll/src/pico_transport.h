@@ -31,6 +31,7 @@
 #define CMD_GET_HW_VERSION  0x12u
 #define CMD_GET_CLOCK       0x13u
 #define CMD_SELECT_IF       0x14u
+#define CMD_SET_TMS         0x15u   /* [level: u8]  → RESP_OK (sin TCK) */
 #define CMD_UART_SET_BAUD   0x20u   /* [u32 LE Hz]  → RESP_OK   */
 #define CMD_UART_SEND       0x21u   /* [N bytes]    → RESP_OK   */
 #define CMD_UART_RECV       0x22u   /* []           → RESP_DATA */

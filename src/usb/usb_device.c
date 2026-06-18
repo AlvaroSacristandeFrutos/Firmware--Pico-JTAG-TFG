@@ -327,6 +327,16 @@ static void usb_handle_setup_packet(void) {
                 }
             }
             usb_acknowledge_out_request();
+        } else if (req == 0x22 /* SET_CONTROL_LINE_STATE */ &&
+                   (pkt->wIndex & 0xFF) == 0) {
+            /* El host abre o cierra el puerto CDC de protocolo (wIndex=0).
+             * pico_port_open llama a SetCommState(DTR_CONTROL_ENABLE) que
+             * dispara este evento; limpiar s_cdc_tx_busy aquí garantiza que
+             * cualquier flag residual de una sesión anterior (p.ej. ACK que
+             * no llegó antes de CloseHandle en pico_detect) se descarta antes
+             * del primer cdc_send de la nueva sesión. */
+            s_cdc_tx_busy = false;
+            usb_acknowledge_out_request();
         } else {
             usb_acknowledge_out_request();
         }

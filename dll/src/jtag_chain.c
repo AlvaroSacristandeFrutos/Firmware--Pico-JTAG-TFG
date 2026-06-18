@@ -12,6 +12,18 @@
 #include "dll_state.h"
 
 #include <string.h>
+#include <stdio.h>
+#include <windows.h>
+
+static void jlog(const char *fmt, ...) {
+    FILE *f = fopen("C:\\pico_log.txt", "a");
+    if (!f) return;
+    SYSTEMTIME st; GetLocalTime(&st);
+    fprintf(f, "[%02d:%02d:%02d.%03d] ", st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
+    va_list ap; va_start(ap, fmt); vfprintf(f, fmt, ap); va_end(ap);
+    fputc('\n', f); fclose(f);
+}
+#include <stdarg.h>
 
 /* ---------------------------------------------------------------------- */
 /*  Clasificador TMS                                                       */
@@ -88,8 +100,14 @@ bool jtag_shift_data(const uint8_t *pTDI, uint8_t *pTDO,
                             pTDO ? s_rx_buf : NULL, &rx_len,
                             2000u);
 
-    if (ok && pTDO && rx_len == (uint16_t)num_bytes)
+    if (ok && pTDO && rx_len == (uint16_t)num_bytes) {
         memcpy(pTDO, s_rx_buf, num_bytes);
+        if (num_bytes <= 4)
+            jlog("SHIFT_DATA %ubits TDO=%02X%02X%02X%02X exit=%d",
+                 numBits, s_rx_buf[0], s_rx_buf[1], s_rx_buf[2], s_rx_buf[3], exit);
+    } else if (!ok) {
+        jlog("SHIFT_DATA %ubits FAILED exit=%d", numBits, exit);
+    }
 
     return ok;
 }
@@ -112,6 +130,11 @@ bool jtag_write_tms(const uint8_t *pTMS, uint32_t numBits) {
                          NULL, NULL, 2000u);
 }
 
+static bool jtag_set_tms(bool level) {
+    uint8_t b = level ? 1u : 0u;
+    return pico_transact(g_hCOM, CMD_SET_TMS, &b, 1u, NULL, NULL, 500u);
+}
+
 bool jtag_store_raw_bitbang(const uint8_t *pTDI, uint8_t *pTDO,
                              const uint8_t *pTMS, uint32_t numBits) {
     if (pTDO)
@@ -121,12 +144,10 @@ bool jtag_store_raw_bitbang(const uint8_t *pTDI, uint8_t *pTDO,
         bool tms = (bool)((pTMS[i >> 3u] >> (i & 7u)) & 1u);
         bool tdi = (bool)((pTDI[i >> 3u] >> (i & 7u)) & 1u);
 
-        /* Generar el bit de TMS */
-        uint8_t tms_byte = tms ? 1u : 0u;
-        if (!jtag_write_tms(&tms_byte, 1u))
+        /* Fijar TMS sin generar TCK, luego SHIFT_DATA genera el único TCK del bit */
+        if (!jtag_set_tms(tms))
             return false;
 
-        /* Desplazar 1 bit TDI, capturar TDO */
         uint8_t tdi_byte = tdi ? 1u : 0u;
         uint8_t tdo_byte = 0u;
         if (!jtag_shift_data(&tdi_byte, pTDO ? &tdo_byte : NULL, 1u, false))
